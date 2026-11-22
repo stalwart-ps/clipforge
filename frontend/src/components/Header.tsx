@@ -1,5 +1,5 @@
 import React from 'react';
-import { Cpu, RefreshCw, Sparkles } from 'lucide-react';
+import { Cpu, RefreshCw, Sparkles, Scissors } from 'lucide-react';
 import { SettingsRead, SystemDiagnosticsResponse } from '../types/diagnostics';
 
 interface HeaderProps {
@@ -7,8 +7,8 @@ interface HeaderProps {
   settings: SettingsRead | null;
   isRefreshing: boolean;
   onRefresh: () => void;
-  activeTab: 'diagnostics' | 'studio' | 'layout' | 'captions';
-  onTabChange: (tab: 'diagnostics' | 'studio' | 'layout' | 'captions') => void;
+  activeTab: 'diagnostics' | 'studio' | 'layout' | 'captions' | 'exports';
+  onTabChange: (tab: 'diagnostics' | 'studio' | 'layout' | 'captions' | 'exports') => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -84,6 +84,17 @@ export const Header: React.FC<HeaderProps> = ({
               }`}
             >
               Caption Studio
+            </button>
+            <button
+              onClick={() => onTabChange('exports')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all flex items-center gap-1.5 ${
+                activeTab === 'exports'
+                  ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              <Scissors className="w-3.5 h-3.5" />
+              Clip Workbench
             </button>
           </nav>
         </div>

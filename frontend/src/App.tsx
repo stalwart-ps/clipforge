@@ -5,6 +5,7 @@ import { DiagnosticsPage } from './pages/DiagnosticsPage';
 import { LayoutStudio } from './pages/LayoutStudio';
 import { CaptionStudio } from './pages/CaptionStudio';
 import { StudioWorkbench } from './pages/StudioWorkbench';
+import { ExportWorkbench } from './pages/ExportWorkbench';
 import {
   CacheStatsResponse,
   SettingsRead,
@@ -13,7 +14,7 @@ import {
 import { AlertCircle, RefreshCw } from 'lucide-react';
 
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<'diagnostics' | 'studio' | 'layout' | 'captions'>('diagnostics');
+  const [activeTab, setActiveTab] = useState<'diagnostics' | 'studio' | 'layout' | 'captions' | 'exports'>('diagnostics');
   const [diagnostics, setDiagnostics] = useState<SystemDiagnosticsResponse | null>(null);
   const [settings, setSettings] = useState<SettingsRead | null>(null);
   const [cacheStats, setCacheStats] = useState<CacheStatsResponse | null>(null);
@@ -98,6 +99,8 @@ export const App: React.FC = () => {
           <LayoutStudio />
         ) : activeTab === 'captions' ? (
           <CaptionStudio />
+        ) : activeTab === 'exports' ? (
+          <ExportWorkbench />
         ) : (
           <StudioWorkbench />
         )}

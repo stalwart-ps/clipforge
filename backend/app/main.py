@@ -13,15 +13,21 @@ from app.framing.router import assets_router, framing_router, profiles_router
 from app.projects.router import router as projects_router
 from app.settings.router import router as settings_router
 from app.captions.router import router as captions_router
+from app.exports.router import router as exports_router
+from app.exports.service import shutdown_export_jobs
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # Startup: Initialize SQLite tables
     await init_db()
-    yield
-    # Shutdown: Dispose engine connection pool
-    await engine.dispose()
+    try:
+        yield
+    finally:
+        # Stop and reap active export subprocesses before the API process exits.
+        await shutdown_export_jobs()
+        # Shutdown: Dispose engine connection pool
+        await engine.dispose()
 
 
 def create_app() -> FastAPI:
@@ -51,6 +57,7 @@ def create_app() -> FastAPI:
     app.include_router(assets_router)
     app.include_router(framing_router)
     app.include_router(captions_router)
+    app.include_router(exports_router)
 
     # Dynamic static file and SPA serving
     @app.get("/{full_path:path}", include_in_schema=False)

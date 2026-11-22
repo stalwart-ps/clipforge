@@ -22,6 +22,7 @@ import {
   CaptionConfig,
   CaptionGenerateResponse,
 } from '../types/project';
+import { ExportClipRequest, ExportJob, ExportOptions } from '../types/exports';
 
 const BASE_URL = '';
 
@@ -256,5 +257,42 @@ export const api = {
 
   async deleteProfile(profileId: string): Promise<void> {
     await fetch(`${BASE_URL}/api/profiles/${profileId}`, { method: 'DELETE' });
+  },
+
+  // Phase 6: preview, cancellable batch exports, and queue status.
+  async startExportBatch(projectId: string, clips: ExportClipRequest[], options: ExportOptions): Promise<{ job: ExportJob }> {
+    const res = await fetch(`${BASE_URL}/api/projects/${projectId}/exports/batch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clips, ...options }),
+    });
+    return handleResponse<{ job: ExportJob }>(res);
+  },
+
+  async getExportJobs(projectId: string): Promise<ExportJob[]> {
+    const res = await fetch(`${BASE_URL}/api/projects/${projectId}/exports/jobs`);
+    return handleResponse<ExportJob[]>(res);
+  },
+
+  async cancelExport(projectId: string, jobId: string): Promise<{ success: boolean; message: string }> {
+    const res = await fetch(`${BASE_URL}/api/projects/${projectId}/exports/jobs/${jobId}/cancel`, { method: 'POST' });
+    return handleResponse<{ success: boolean; message: string }>(res);
+  },
+
+  async previewExport(projectId: string, startSec: number, endSec: number, options: ExportOptions): Promise<Blob> {
+    const res = await fetch(`${BASE_URL}/api/projects/${projectId}/exports/preview`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startSec, endSec, ...options }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({ detail: res.statusText }));
+      throw new Error(body.detail || `Preview failed (${res.status})`);
+    }
+    return res.blob();
+  },
+
+  getExportFileUrl(projectId: string, jobId: string, fileName: string): string {
+    return `${BASE_URL}/api/projects/${projectId}/exports/jobs/${jobId}/files/${encodeURIComponent(fileName)}`;
   },
 };
