@@ -9,7 +9,7 @@ from app.core.config import settings
 from app.core.db import engine, init_db
 from app.core.errors import register_error_handlers
 from app.diagnostics.router import router as diagnostics_router
-from app.framing.router import framing_router, profiles_router
+from app.framing.router import assets_router, framing_router, profiles_router
 from app.projects.router import router as projects_router
 from app.settings.router import router as settings_router
 
@@ -47,6 +47,7 @@ def create_app() -> FastAPI:
     app.include_router(settings_router)
     app.include_router(projects_router)
     app.include_router(profiles_router)
+    app.include_router(assets_router)
     app.include_router(framing_router)
 
     # Dynamic static file and SPA serving

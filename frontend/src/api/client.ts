@@ -9,7 +9,6 @@ import {
 import {
   AutoDetectResult,
   DiscoverClipsRequest,
-  FramingConfig,
   IngestUrlRequest,
   ProjectRead,
   ProjectSummary,
@@ -184,6 +183,13 @@ export const api = {
       body: JSON.stringify(payload),
     });
     return handleResponse<RenderResponse>(res);
+  },
+
+  async uploadWatermark(file: File): Promise<{ path: string }> {
+    const form = new FormData();
+    form.append('file', file);
+    const res = await fetch(`${BASE_URL}/api/framing/watermark`, { method: 'POST', body: form });
+    return handleResponse<{ path: string }>(res);
   },
 
   // Phase 4: Saved Profiles CRUD

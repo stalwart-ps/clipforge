@@ -93,6 +93,8 @@ export const App: React.FC = () => {
             onSettingsUpdated={setSettings}
             onCacheCleaned={setCacheStats}
           />
+        ) : activeTab === 'layout' ? (
+          <LayoutStudio />
         ) : (
           <StudioWorkbench />
         )}

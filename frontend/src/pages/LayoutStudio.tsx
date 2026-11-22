@@ -13,7 +13,6 @@ import {
   EyeOff,
   Layers,
   Loader2,
-  RefreshCw,
   ScanSearch,
   Trash2,
   Video,
@@ -100,26 +99,6 @@ function boxToPx(box: RegionBox, canvasW: number, canvasH: number) {
   };
 }
 
-function framingConfigToApiPayload(config: FramingConfig): object {
-  // Convert camelCase TS types to snake_case for FastAPI
-  return {
-    framing_mode: config.framingMode,
-    aspect_ratio: config.aspectRatio,
-    layout_template: config.layoutTemplate,
-    facecam_box: config.facecamBox,
-    gameplay_box: config.gameplayBox,
-    split_ratio: config.splitRatio,
-    watermark: config.watermark
-      ? {
-          path: config.watermark.path,
-          corner: config.watermark.corner,
-          scale: config.watermark.scale,
-          opacity: config.watermark.opacity,
-        }
-      : null,
-  };
-}
-
 export const LayoutStudio: React.FC = () => {
   // ── Project selector ──────────────────────────────────────────────────────
   const [projects, setProjects] = useState<ProjectSummary[]>([]);
@@ -143,6 +122,7 @@ export const LayoutStudio: React.FC = () => {
   const [gameplayBox, setGameplayBox] = useState<RegionBox | null>({
     x: 0.0, y: 0.0, w: 1.0, h: 1.0,
   });
+  const [faceDetected, setFaceDetected] = useState<boolean | null>(null);
 
   // ── Safe-zone overlay ─────────────────────────────────────────────────────
   const [safeZoneKey, setSafeZoneKey] = useState<SafeZoneKey>(null);
@@ -150,6 +130,8 @@ export const LayoutStudio: React.FC = () => {
   // ── Watermark ─────────────────────────────────────────────────────────────
   const [watermarkOpacity, setWatermarkOpacity] = useState(0.8);
   const [watermarkScale, setWatermarkScale] = useState(0.1);
+  const [watermarkPath, setWatermarkPath] = useState<string | null>(null);
+  const [watermarkPreview, setWatermarkPreview] = useState<string | null>(null);
   const [watermarkCorner, setWatermarkCorner] = useState<'top_left' | 'top_right' | 'bottom_left' | 'bottom_right'>('bottom_right');
 
   // ── Auto-detect ───────────────────────────────────────────────────────────
@@ -171,6 +153,7 @@ export const LayoutStudio: React.FC = () => {
 
   // ── Canvas DnD ────────────────────────────────────────────────────────────
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const outputCanvasRef = useRef<HTMLCanvasElement>(null);
   const dragRef = useRef<DragState>({
     boxKey: null,
     action: null,
@@ -298,6 +281,80 @@ export const LayoutStudio: React.FC = () => {
     drawCanvas();
   }, [drawCanvas]);
 
+  const drawOutputPreview = useCallback(() => {
+    const canvas = outputCanvasRef.current;
+    const image = imgRef.current;
+    if (!canvas) return;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
+    const W = canvas.width;
+    const H = canvas.height;
+    ctx.fillStyle = '#070b12';
+    ctx.fillRect(0, 0, W, H);
+    if (!image || !imgLoaded || !image.naturalWidth) {
+      ctx.fillStyle = '#64748b';
+      ctx.font = '12px monospace';
+      ctx.textAlign = 'center';
+      ctx.fillText('Output preview', W / 2, H / 2);
+      return;
+    }
+    const drawRegion = (box: RegionBox | null, dx: number, dy: number, dw: number, dh: number) => {
+      if (!box) return;
+      const sx = box.x * image.naturalWidth;
+      const sy = box.y * image.naturalHeight;
+      const sw = box.w * image.naturalWidth;
+      const sh = box.h * image.naturalHeight;
+      const scale = Math.min(dw / sw, dh / sh);
+      const rw = sw * scale;
+      const rh = sh * scale;
+      ctx.drawImage(image, sx, sy, sw, sh, dx + (dw - rw) / 2, dy + (dh - rh) / 2, rw, rh);
+    };
+    if (layoutTemplate === 'split_vertical' && facecamBox && gameplayBox) {
+      const first = framingMode === 'screen_presenter' ? gameplayBox : facecamBox;
+      const second = framingMode === 'screen_presenter' ? facecamBox : gameplayBox;
+      drawRegion(first, 0, 0, W, H * splitRatio / 100);
+      drawRegion(second, 0, H * splitRatio / 100, W, H * (100 - splitRatio) / 100);
+    } else if (layoutTemplate === 'pip') {
+      drawRegion(gameplayBox, 0, 0, W, H);
+      drawRegion(facecamBox, W * 0.68, H * 0.04, W * 0.28, H * 0.22);
+    } else if (layoutTemplate === 'blurred_fill') {
+      ctx.save();
+      ctx.filter = 'blur(10px)';
+      ctx.drawImage(image, 0, 0, W, H);
+      ctx.restore();
+      drawRegion(gameplayBox ?? facecamBox, 0, 0, W, H);
+    } else {
+      drawRegion(framingMode === 'talking_head' || framingMode === 'podcast' ? (facecamBox ?? gameplayBox) : gameplayBox, 0, 0, W, H);
+    }
+    if (safeZoneKey && SAFE_ZONES[safeZoneKey]) {
+      for (const zone of SAFE_ZONES[safeZoneKey].zones) {
+        ctx.fillStyle = zone.color;
+        ctx.fillRect(zone.x * W, zone.y * H, zone.w * W, zone.h * H);
+        ctx.strokeStyle = zone.color.replace('0.18', '0.55').replace('0.12', '0.45');
+        ctx.setLineDash([4, 3]);
+        ctx.strokeRect(zone.x * W, zone.y * H, zone.w * W, zone.h * H);
+        ctx.setLineDash([]);
+      }
+    }
+    if (watermarkPreview) {
+      const logo = new Image();
+      logo.onload = () => {
+        const logoW = W * watermarkScale;
+        const logoH = logoW * logo.height / logo.width;
+        const x = watermarkCorner.endsWith('right') ? W - logoW - 8 : 8;
+        const y = watermarkCorner.startsWith('bottom') ? H - logoH - 8 : 8;
+        ctx.globalAlpha = watermarkOpacity;
+        ctx.drawImage(logo, x, y, logoW, logoH);
+        ctx.globalAlpha = 1;
+      };
+      logo.src = watermarkPreview;
+    }
+  }, [imgLoaded, aspectRatio, framingMode, layoutTemplate, facecamBox, gameplayBox, splitRatio, safeZoneKey, watermarkPreview, watermarkScale, watermarkOpacity, watermarkCorner]);
+
+  useEffect(() => {
+    drawOutputPreview();
+  }, [drawOutputPreview]);
+
   // ── Canvas mouse DnD ──────────────────────────────────────────────────────
   const hitTest = useCallback(
     (cx: number, cy: number): { boxKey: 'facecam' | 'gameplay'; action: 'move' | 'resize-br' } | null => {
@@ -325,9 +382,10 @@ export const LayoutStudio: React.FC = () => {
 
   const onMouseDown = useCallback(
     (e: React.MouseEvent<HTMLCanvasElement>) => {
-      const rect = canvasRef.current!.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
+      const canvas = canvasRef.current!;
+      const rect = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * canvas.width / rect.width;
+      const my = (e.clientY - rect.top) * canvas.height / rect.height;
       const hit = hitTest(mx, my);
       if (!hit) return;
       const box = hit.boxKey === 'facecam' ? facecamBox : gameplayBox;
@@ -348,9 +406,10 @@ export const LayoutStudio: React.FC = () => {
       const { boxKey, action, startMouseX, startMouseY, startBox } = dragRef.current;
       if (!boxKey || !action) return;
 
-      const rect = canvasRef.current!.getBoundingClientRect();
-      const mx = e.clientX - rect.left;
-      const my = e.clientY - rect.top;
+      const canvas = canvasRef.current!;
+      const rect = canvas.getBoundingClientRect();
+      const mx = (e.clientX - rect.left) * canvas.width / rect.width;
+      const my = (e.clientY - rect.top) * canvas.height / rect.height;
       const W = PREVIEW_W;
       const H = canvasH;
       const dx = (mx - startMouseX) / W;
@@ -363,7 +422,10 @@ export const LayoutStudio: React.FC = () => {
         newBox = clampBox({ ...startBox, w: startBox.w + dx, h: startBox.h + dy });
       }
 
-      if (boxKey === 'facecam') setFacecamBox(newBox);
+      if (boxKey === 'facecam') {
+        setFacecamBox(newBox);
+        setFaceDetected(true);
+      }
       else setGameplayBox(newBox);
     },
     [canvasH]
@@ -382,7 +444,9 @@ export const LayoutStudio: React.FC = () => {
       const result = await api.autoDetectRegions(activeProject.id, frameSec);
       setDetectResult(result);
       if (result.facecamBox) setFacecamBox(result.facecamBox);
+      else if (result.faceCount === 0) setFacecamBox(null);
       if (result.gameplayBox) setGameplayBox(result.gameplayBox);
+      setFaceDetected(result.faceCount > 0);
       if (result.modeSuggestion) setFramingMode(result.modeSuggestion);
     } catch (err) {
       console.error('Auto-detect failed:', err);
@@ -404,7 +468,7 @@ export const LayoutStudio: React.FC = () => {
         facecamBox,
         gameplayBox,
         splitRatio,
-        watermark: null,
+        watermark: watermarkPath ? { path: watermarkPath, corner: watermarkCorner, scale: watermarkScale, opacity: watermarkOpacity } : null,
         ollamaPrompt: null,
         captionStyle: 'hormozi_pop',
       } as Parameters<typeof api.createProfile>[0]);
@@ -423,7 +487,12 @@ export const LayoutStudio: React.FC = () => {
     setLayoutTemplate(profile.layoutTemplate);
     setSplitRatio(profile.splitRatio);
     if (profile.facecamBox) setFacecamBox(profile.facecamBox);
-    if (profile.gameplayBox) setGameplayBox(profile.gameplayBox);
+    else setFacecamBox(null);
+    setFaceDetected(profile.facecamBox ? true : null);
+    setWatermarkPath(profile.watermark?.path ?? null);
+    setWatermarkCorner(profile.watermark?.corner ?? 'bottom_right');
+    setWatermarkScale(profile.watermark?.scale ?? 0.1);
+    setWatermarkOpacity(profile.watermark?.opacity ?? 0.8);
   };
 
   const handleDeleteProfile = async (id: string) => {
@@ -445,7 +514,8 @@ export const LayoutStudio: React.FC = () => {
       facecamBox,
       gameplayBox,
       splitRatio,
-      watermark: null,
+      watermark: watermarkPath ? { path: watermarkPath, corner: watermarkCorner, scale: watermarkScale, opacity: watermarkOpacity } : null,
+      faceDetected,
     };
 
     try {
@@ -553,17 +623,30 @@ export const LayoutStudio: React.FC = () => {
               </div>
             </div>
 
-            <canvas
-              ref={canvasRef}
-              width={PREVIEW_W}
-              height={Math.round(PREVIEW_W * (oH / ASPECT_DIMS[aspectRatio][0]))}
-              className="rounded-lg border border-border w-full cursor-crosshair select-none"
-              style={{ imageRendering: 'pixelated' }}
-              onMouseDown={onMouseDown}
-              onMouseMove={onMouseMove}
-              onMouseUp={onMouseUp}
-              onMouseLeave={onMouseUp}
-            />
+            <div className="grid grid-cols-2 gap-2">
+              <div className="min-w-0">
+                <div className="mb-1 text-[10px] font-mono text-slate-400">Regions</div>
+                <canvas
+                  ref={canvasRef}
+                  width={PREVIEW_W}
+                  height={Math.round(PREVIEW_W * (oH / ASPECT_DIMS[aspectRatio][0]))}
+                  className="rounded-lg border border-border w-full cursor-crosshair select-none touch-none"
+                  onMouseDown={onMouseDown}
+                  onMouseMove={onMouseMove}
+                  onMouseUp={onMouseUp}
+                  onMouseLeave={onMouseUp}
+                />
+              </div>
+              <div className="min-w-0">
+                <div className="mb-1 text-[10px] font-mono text-slate-400">Output</div>
+                <canvas
+                  ref={outputCanvasRef}
+                  width={PREVIEW_W}
+                  height={Math.round(PREVIEW_W * (oH / ASPECT_DIMS[aspectRatio][0]))}
+                  className="rounded-lg border border-border w-full"
+                />
+              </div>
+            </div>
 
             <p className="text-[10px] text-slate-500 font-mono">
               Drag boxes to reposition. Drag bottom-right corner to resize.
@@ -572,7 +655,7 @@ export const LayoutStudio: React.FC = () => {
             {/* Box reset toggles */}
             <div className="flex gap-2">
               <button
-                onClick={() => setFacecamBox({ x: 0.0, y: 0.0, w: 0.3, h: 0.25 })}
+                onClick={() => { setFacecamBox({ x: 0.0, y: 0.0, w: 0.3, h: 0.25 }); setFaceDetected(true); }}
                 className="px-2 py-1 text-[10px] font-mono rounded border border-fuchsia-700 text-fuchsia-400 hover:bg-fuchsia-950 transition-all"
               >
                 Reset Facecam
@@ -735,6 +818,30 @@ export const LayoutStudio: React.FC = () => {
           <section className="space-y-2">
             <h2 className="text-xs font-mono font-semibold text-slate-300 uppercase tracking-widest">Brand Watermark</h2>
             <div className="grid grid-cols-2 gap-3">
+              <div className="col-span-2">
+                <label className="text-[11px] font-mono text-slate-400 mb-1 block">Transparent PNG logo</label>
+                <input
+                  type="file"
+                  accept="image/png,.png"
+                  onChange={async (event) => {
+                    const file = event.target.files?.[0];
+                    if (!file) return;
+                    try {
+                      const uploaded = await api.uploadWatermark(file);
+                      setWatermarkPath(uploaded.path);
+                      setWatermarkPreview((previous) => {
+                        if (previous) URL.revokeObjectURL(previous);
+                        return URL.createObjectURL(file);
+                      });
+                    } catch (error) {
+                      setRenderError(error instanceof Error ? error.message : 'Watermark upload failed');
+                    }
+                  }}
+                  className="block w-full text-[11px] text-slate-300 file:mr-3 file:rounded file:border-0 file:bg-slate-700 file:px-3 file:py-1.5 file:text-slate-100"
+                />
+                {watermarkPreview && <img src={watermarkPreview} alt="Watermark preview" className="mt-2 h-10 max-w-32 object-contain" />}
+                {watermarkPath && <button type="button" onClick={() => { setWatermarkPath(null); setWatermarkPreview(null); }} className="mt-1 text-[10px] text-rose-300">Remove watermark</button>}
+              </div>
               <div>
                 <label className="text-[11px] font-mono text-slate-400 mb-1 block">Corner Position</label>
                 <select
@@ -761,9 +868,7 @@ export const LayoutStudio: React.FC = () => {
                   className="w-full accent-cyan-500" />
               </div>
             </div>
-            <p className="text-[10px] font-mono text-slate-500">
-              Upload a transparent PNG watermark via the Settings page and configure its server path in a Saved Profile.
-            </p>
+            <p className="text-[10px] font-mono text-slate-500">Logo and placement are included in saved profiles and renders.</p>
           </section>
 
           {/* Render Controls */}

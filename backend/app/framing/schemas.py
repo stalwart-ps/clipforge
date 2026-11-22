@@ -48,6 +48,8 @@ class FramingConfig(APISchema):
 
     # Watermark
     watermark: WatermarkConfig | None = None
+    # `None` means let Gaming Mode use its full-frame no-face fallback.
+    face_detected: bool | None = None
 
 
 # ---------------------------------------------------------------------------

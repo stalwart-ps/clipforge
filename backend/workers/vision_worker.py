@@ -64,7 +64,6 @@ def detect_regions(video_path: str, time_sec: float = 1.0) -> dict:
             "message": "Failed to read frame",
         }
 
-    h_px, w_px = frame.shape[:2]
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
 
     # MediaPipe Face Detection
@@ -79,12 +78,14 @@ def detect_regions(video_path: str, time_sec: float = 1.0) -> dict:
         if results.detections:
             for det in results.detections:
                 bbox = det.location_data.relative_bounding_box
+                left = max(0.0, min(1.0, float(bbox.xmin)))
+                top = max(0.0, min(1.0, float(bbox.ymin)))
                 faces_data.append(
                     {
-                        "x": max(0.0, float(bbox.xmin)),
-                        "y": max(0.0, float(bbox.ymin)),
-                        "w": min(1.0, float(bbox.width)),
-                        "h": min(1.0, float(bbox.height)),
+                        "x": left,
+                        "y": top,
+                        "w": min(1.0 - left, max(0.001, float(bbox.width))),
+                        "h": min(1.0 - top, max(0.001, float(bbox.height))),
                         "confidence": float(det.score[0]) if det.score else 0.0,
                     }
                 )
@@ -154,15 +155,122 @@ def detect_regions(video_path: str, time_sec: float = 1.0) -> dict:
     }
 
 
+def detect_active_speaker_tracks(video_path: str, start_sec: float, end_sec: float) -> dict:
+    """Sample Face Mesh mouth motion, select speakers, and smooth focus per cut.
+
+    Heavy vision dependencies are intentionally confined to this worker process.
+    PySceneDetect cut boundaries reset both mouth history and camera smoothing.
+    """
+    import cv2
+    import mediapipe as mp
+    from scenedetect import ContentDetector, FrameTimecode, SceneManager, open_video
+
+    video = open_video(video_path)
+    scene_manager = SceneManager()
+    scene_manager.add_detector(ContentDetector(threshold=27.0, min_scene_len=1))
+    video.seek(FrameTimecode(start_sec, video.frame_rate))
+    scene_manager.detect_scenes(
+        video,
+        duration=FrameTimecode(max(0.0, end_sec - start_sec), video.frame_rate),
+    )
+    scenes = scene_manager.get_scene_list()
+    cuts = [float(scene[0].get_seconds()) for scene in scenes if start_sec < float(scene[0].get_seconds()) < end_sec]
+
+    cap = cv2.VideoCapture(video_path)
+    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
+    step = max(1, round(fps / 5.0))
+    cap.set(cv2.CAP_PROP_POS_MSEC, start_sec * 1000.0)
+    sample_sec = step / fps
+    rows: list[dict] = []
+    histories: dict[int, list[tuple[float, float]]] = {}
+    cut_index = 0
+    last_cut = start_sec
+    pending_cut = False
+    frame_idx = max(0, round(start_sec * fps))
+    mesh = mp.solutions.face_mesh.FaceMesh(
+        static_image_mode=True, max_num_faces=4, refine_landmarks=True,
+        min_detection_confidence=0.45,
+    )
+    try:
+        while frame_idx / fps < end_sec:
+            ok, frame = cap.read()
+            if not ok:
+                break
+            t = frame_idx / fps
+            if cut_index < len(cuts) and t >= cuts[cut_index]:
+                last_cut = cuts[cut_index]
+                cut_index += 1
+                histories.clear()
+                pending_cut = True
+            if (frame_idx - round(start_sec * fps)) % step:
+                frame_idx += 1
+                continue
+            h, w = frame.shape[:2]
+            result = mesh.process(cv2.cvtColor(frame, cv2.COLOR_BGR2RGB))
+            faces = []
+            if result.multi_face_landmarks:
+                for face_id, landmarks in enumerate(result.multi_face_landmarks):
+                    xs = [point.x for point in landmarks.landmark]
+                    ys = [point.y for point in landmarks.landmark]
+                    # Face Mesh lip landmarks: upper/lower center and mouth corners.
+                    lm = landmarks.landmark
+                    mouth_open = abs(lm[13].y - lm[14].y) / max(0.01, abs(lm[78].x - lm[308].x))
+                    box = {"x": max(0.0, min(xs)), "y": max(0.0, min(ys)),
+                           "w": max(0.01, min(1.0, max(xs) - min(xs))),
+                           "h": max(0.01, min(1.0, max(ys) - min(ys)))}
+                    history = histories.setdefault(face_id, [])
+                    history.append((t, mouth_open))
+                    history[:] = [entry for entry in history if t - entry[0] <= 1.2]
+                    values = [entry[1] for entry in history]
+                    variance = (sum((value - sum(values) / len(values)) ** 2 for value in values) / len(values)) if len(values) > 1 else 0.0
+                    faces.append({"id": face_id, "box": box, "activity": variance})
+            active = max(faces, key=lambda face: face["activity"], default=None)
+            rows.append({"time": t - start_sec, "cut": pending_cut,
+                         "faces": faces, "active_id": active["id"] if active else None,
+                         "box": active["box"] if active else None})
+            pending_cut = False
+            frame_idx += 1
+    finally:
+        mesh.close()
+        cap.release()
+
+    # Deadband avoids following weak mouth noise. Exponential smoothing is restarted at cuts.
+    smoothed = None
+    focus = []
+    active_id = None
+    alpha, deadband = 0.32, 0.0015
+    for row in rows:
+        box = row["box"]
+        if row["cut"]:
+            smoothed = None
+            active_id = None
+        candidate = next((f for f in row["faces"] if f["id"] == row["active_id"]), None)
+        if not candidate or candidate["activity"] < deadband:
+            box = smoothed
+        else:
+            if smoothed is None or active_id != candidate["id"]:
+                smoothed = dict(box)
+            else:
+                smoothed = {key: (1 - alpha) * smoothed[key] + alpha * box[key] for key in box}
+            active_id = candidate["id"]
+            box = smoothed
+        focus.append({"time": row["time"], "box": box, "cut": row["cut"]})
+    return {"tracks": focus, "cuts": [cut - start_sec for cut in cuts]}
+
+
 def main():
     parser = argparse.ArgumentParser(description="Phase 4 Vision Worker — Auto-Detect Regions")
     parser.add_argument("--video-path", required=True)
     parser.add_argument("--time-sec", type=float, default=5.0)
     parser.add_argument("--output-json", required=False, default=None)
+    parser.add_argument("--track-start", type=float, default=None)
+    parser.add_argument("--track-end", type=float, default=None)
     args = parser.parse_args()
 
     try:
-        result = detect_regions(args.video_path, args.time_sec)
+        result = (detect_active_speaker_tracks(args.video_path, args.track_start, args.track_end)
+                  if args.track_start is not None and args.track_end is not None
+                  else detect_regions(args.video_path, args.time_sec))
     except Exception as e:
         result = {
             "face_count": 0,

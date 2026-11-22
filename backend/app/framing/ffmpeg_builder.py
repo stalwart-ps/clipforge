@@ -92,6 +92,7 @@ def build_filter_complex(
     config: FramingConfig,
     src_w: int,
     src_h: int,
+    speaker_tracks: list[dict] | None = None,
 ) -> tuple[str, int, int]:
     """
     Build the -filter_complex string for the given FramingConfig.
@@ -143,7 +144,7 @@ def build_filter_complex(
         if mode == "gaming":
             # Top = facecam, Bottom = gameplay
             # If no face detected, fall back to blurred fill for the whole frame
-            if config.facecam_box and config.gameplay_box:
+            if config.facecam_box and config.gameplay_box and config.face_detected is not False:
                 facecam_parts = _safe_crop(config.facecam_box, src_w, src_h, "0:v", "face_raw")
                 fc_top = _scale_to("face_raw", "top", out_w, top_h)
                 gameplay_parts = _safe_crop(config.gameplay_box, src_w, src_h, "0:v", "game_raw")
@@ -176,6 +177,34 @@ def build_filter_complex(
             else:
                 fc = _blurred_fill(out_w, out_h)
 
+        elif mode in ("podcast", "talking_head") and speaker_tracks:
+            tracked_boxes = [row for row in speaker_tracks if row.get("box")]
+            if tracked_boxes:
+                first = tracked_boxes[0]["box"]
+                crop_w = max(2, min(src_w, int(first["w"] * src_w * 1.55))) & ~1
+                crop_h = max(2, min(src_h, int(first["h"] * src_h * 1.75))) & ~1
+                default_x = (src_w - crop_w) // 2
+                default_y = (src_h - crop_h) // 2
+                # Fixed crop size avoids zoom pumping. Cut events return to center,
+                # while active speaker boxes update its position over time.
+                x_expr, y_expr = str(default_x), str(default_y)
+                for row in speaker_tracks:
+                    box = row.get("box")
+                    if not box and not row.get("cut"):
+                        continue
+                    x = default_x if not box else max(0, min(src_w - crop_w, int(box["x"] * src_w + box["w"] * src_w / 2 - crop_w / 2)))
+                    y = default_y if not box else max(0, min(src_h - crop_h, int(box["y"] * src_h + box["h"] * src_h / 2 - crop_h / 2)))
+                    timestamp = max(0.0, float(row["time"]))
+                    x_expr = f"if(gte(t\\,{timestamp:.3f})\\,{x}\\,{x_expr})"
+                    y_expr = f"if(gte(t\\,{timestamp:.3f})\\,{y}\\,{y_expr})"
+                fc = (
+                    f"[0:v]crop={crop_w}:{crop_h}:x='{x_expr}':y='{y_expr}',"
+                    f"scale={out_w}:{out_h}:force_original_aspect_ratio=decrease,"
+                    f"pad={out_w}:{out_h}:(ow-iw)/2:(oh-ih)/2:black,setsar=1:1[vout]"
+                )
+            else:
+                fc = _blurred_fill(out_w, out_h)
+
         elif mode in ("podcast", "talking_head"):
             # Single tracked face region centred; blurred background behind
             box = config.facecam_box or config.gameplay_box
@@ -196,7 +225,7 @@ def build_filter_complex(
 
         elif mode == "screen_presenter":
             # Bottom = presenter (facecam) small, Top = screen (gameplay)
-            if config.facecam_box and config.gameplay_box:
+            if config.facecam_box and config.gameplay_box and config.face_detected is not False:
                 fc_screen = _safe_crop(config.gameplay_box, src_w, src_h, "0:v", "screen_raw")
                 fc_top = _scale_to("screen_raw", "top", out_w, top_h)
                 fc_pres = _safe_crop(config.facecam_box, src_w, src_h, "0:v", "pres_raw")
@@ -221,8 +250,6 @@ def build_filter_complex(
         wm_path = config.watermark.path
         wm_scale = max(0.01, min(1.0, config.watermark.scale))
         wm_opacity = max(0.0, min(1.0, config.watermark.opacity))
-        wm_w = f"iw*{wm_scale}"
-        wm_h = "ih*iw/ow"  # maintain aspect ratio
         corner = config.watermark.corner
         margin = 20
 
@@ -255,6 +282,7 @@ def _get_base_encode_args(out_w: int, out_h: int, encoder: str) -> list[str]:
             "-rc:v", "vbr",
             "-cq:v", "19",
             "-b:v", "0",
+            "-pix_fmt", "yuv420p",
         ]
     else:
         return [
@@ -275,6 +303,7 @@ def build_ffmpeg_cmd(
     end_sec: float,
     encoder: str = "h264_nvenc",
     watermark_path: str | None = None,
+    speaker_tracks: list[dict] | None = None,
 ) -> list[str]:
     """
     Assemble a complete FFmpeg command for rendering a clip.
@@ -293,7 +322,7 @@ def build_ffmpeg_cmd(
         config = config.model_copy(update={"watermark": WatermarkConfig(path=watermark_path)})
 
     has_watermark = bool(config.watermark and config.watermark.path and Path(config.watermark.path).exists())
-    fc_str, out_w, out_h = build_filter_complex(config, src_w, src_h)
+    fc_str, out_w, out_h = build_filter_complex(config, src_w, src_h, speaker_tracks)
 
     ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
     duration = end_sec - start_sec
@@ -312,7 +341,7 @@ def build_ffmpeg_cmd(
         "-t", str(duration),
         "-filter_complex", fc_str,
         "-map", "[vout]",
-        "-map", "0:a",
+        "-map", "0:a?",
         "-fps_mode", "cfr",        # ← VFR-to-CFR sync protection (output side)
         "-c:a", "aac",
         "-b:a", "128k",
@@ -334,6 +363,7 @@ def try_render(
     start_sec: float,
     end_sec: float,
     timeout: float = 1800.0,
+    speaker_tracks: list[dict] | None = None,
 ) -> tuple[str, str]:
     """
     Try h264_nvenc first; on failure re-run with libx264.
@@ -343,7 +373,8 @@ def try_render(
     """
     for encoder in ("h264_nvenc", "libx264"):
         cmd = build_ffmpeg_cmd(
-            input_path, output_path, config, src_w, src_h, start_sec, end_sec, encoder
+            input_path, output_path, config, src_w, src_h, start_sec, end_sec, encoder,
+            speaker_tracks=speaker_tracks,
         )
         result = subprocess.run(
             cmd,
@@ -353,12 +384,8 @@ def try_render(
         )
         if result.returncode == 0:
             return encoder, result.stderr.decode("utf-8", errors="ignore")
-        # If NVENC not available, FFmpeg will error; try libx264
-        if encoder == "h264_nvenc":
-            stderr = result.stderr.decode("utf-8", errors="ignore")
-            if "nvenc" not in stderr.lower() and "no capable" not in stderr.lower():
-                # It's a real error, not a missing encoder error
-                return encoder, stderr
+        # Any NVENC failure (driver, device busy, unsupported preset, or codec
+        # setup) gets a CPU retry so the configured render still completes.
 
     # If libx264 also failed raise
     raise RuntimeError(f"FFmpeg render failed with both h264_nvenc and libx264")

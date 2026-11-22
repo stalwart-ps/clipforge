@@ -154,6 +154,7 @@ export interface FramingConfig {
   gameplayBox: RegionBox | null;
   splitRatio: number; // 10–90 (top pane %)
   watermark: WatermarkConfig | null;
+  faceDetected?: boolean | null;
 }
 
 export interface SavedProfile {

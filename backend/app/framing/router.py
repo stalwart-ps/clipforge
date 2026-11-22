@@ -17,13 +17,13 @@ import json
 import sys
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, status
 from fastapi.responses import FileResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.core.db import get_db_session
-from app.framing.auto_detect import auto_detect_regions
+from app.framing.auto_detect import auto_detect_regions, track_active_speaker
 from app.framing.schemas import (
     AutoDetectResult,
     FramingConfig,
@@ -40,6 +40,24 @@ from app.projects.service import ProjectService
 
 profiles_router = APIRouter(prefix="/api/profiles", tags=["profiles"])
 framing_router = APIRouter(prefix="/api/projects", tags=["framing"])
+assets_router = APIRouter(prefix="/api/framing", tags=["framing"])
+
+
+@assets_router.post("/watermark")
+async def upload_watermark(file: UploadFile = File(...)) -> dict[str, str]:
+    """Store a local PNG watermark and return its path for render/profile configs."""
+    if Path(file.filename or "").suffix.lower() != ".png":
+        raise HTTPException(status_code=415, detail="Watermark must be a PNG image")
+    data = await file.read(8 * 1024 * 1024 + 1)
+    if len(data) > 8 * 1024 * 1024:
+        raise HTTPException(status_code=413, detail="Watermark must be 8 MB or smaller")
+    if not data.startswith(b"\x89PNG\r\n\x1a\n"):
+        raise HTTPException(status_code=415, detail="Uploaded file is not a valid PNG")
+    folder = settings.cache_dir / "watermarks"
+    folder.mkdir(parents=True, exist_ok=True)
+    path = folder / f"{__import__('uuid').uuid4().hex}.png"
+    path.write_bytes(data)
+    return {"path": str(path)}
 
 
 # ---------------------------------------------------------------------------
@@ -175,6 +193,14 @@ async def render_project_clip(
     if payload.profile_id:
         framing_config = await ProfileService.profile_to_framing_config(session, payload.profile_id)
 
+    speaker_tracks = None
+    if framing_config.framing_mode in ("podcast", "talking_head"):
+        try:
+            speaker_tracks = await track_active_speaker(project.video_path, start_sec, end_sec)
+        except Exception:
+            # The worker is optional at install time; static manual framing remains usable.
+            speaker_tracks = None
+
     # Determine source dimensions
     src_w = project.width or 1920
     src_h = project.height or 1080
@@ -197,6 +223,7 @@ async def render_project_clip(
             src_h,
             start_sec,
             end_sec,
+            speaker_tracks,
         )
     except Exception as e:
         raise HTTPException(status_code=500, detail=f"Render failed: {e}")
@@ -220,6 +247,8 @@ def _do_render(
     src_h: int,
     start_sec: float,
     end_sec: float,
+    speaker_tracks: list[dict] | None = None,
 ) -> tuple[str, str]:
     from app.framing.ffmpeg_builder import try_render
-    return try_render(video_path, output_path, config, src_w, src_h, start_sec, end_sec)
+    return try_render(video_path, output_path, config, src_w, src_h, start_sec, end_sec,
+                      speaker_tracks=speaker_tracks)
