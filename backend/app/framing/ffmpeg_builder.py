@@ -93,6 +93,7 @@ def build_filter_complex(
     src_w: int,
     src_h: int,
     speaker_tracks: list[dict] | None = None,
+    ass_path: str | None = None,
 ) -> tuple[str, int, int]:
     """
     Build the -filter_complex string for the given FramingConfig.
@@ -270,6 +271,12 @@ def build_filter_complex(
             f"[pre_wm][wm]overlay={wm_x}:{wm_y}[vout]"
         )
 
+    if ass_path and Path(ass_path).is_file():
+        # FFmpeg filter paths require escaping Windows drive colons and separators.
+        escaped_ass = str(Path(ass_path).resolve()).replace("\\", "/").replace(":", r"\:").replace("'", r"\'")
+        fc = fc.replace("[vout]", "[pre_ass]")
+        fc += f";[pre_ass]ass='{escaped_ass}'[vout]"
+
     return fc, out_w, out_h
 
 
@@ -304,6 +311,7 @@ def build_ffmpeg_cmd(
     encoder: str = "h264_nvenc",
     watermark_path: str | None = None,
     speaker_tracks: list[dict] | None = None,
+    ass_path: str | None = None,
 ) -> list[str]:
     """
     Assemble a complete FFmpeg command for rendering a clip.
@@ -322,7 +330,7 @@ def build_ffmpeg_cmd(
         config = config.model_copy(update={"watermark": WatermarkConfig(path=watermark_path)})
 
     has_watermark = bool(config.watermark and config.watermark.path and Path(config.watermark.path).exists())
-    fc_str, out_w, out_h = build_filter_complex(config, src_w, src_h, speaker_tracks)
+    fc_str, out_w, out_h = build_filter_complex(config, src_w, src_h, speaker_tracks, ass_path)
 
     ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
     duration = end_sec - start_sec
@@ -364,6 +372,7 @@ def try_render(
     end_sec: float,
     timeout: float = 1800.0,
     speaker_tracks: list[dict] | None = None,
+    ass_path: str | None = None,
 ) -> tuple[str, str]:
     """
     Try h264_nvenc first; on failure re-run with libx264.
@@ -374,7 +383,7 @@ def try_render(
     for encoder in ("h264_nvenc", "libx264"):
         cmd = build_ffmpeg_cmd(
             input_path, output_path, config, src_w, src_h, start_sec, end_sec, encoder,
-            speaker_tracks=speaker_tracks,
+            speaker_tracks=speaker_tracks, ass_path=ass_path,
         )
         result = subprocess.run(
             cmd,

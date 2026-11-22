@@ -19,6 +19,8 @@ import {
   TranscriptData,
   TranscriptSegment,
   CandidateClip,
+  CaptionConfig,
+  CaptionGenerateResponse,
 } from '../types/project';
 
 const BASE_URL = '';
@@ -146,6 +148,42 @@ export const api = {
       body: JSON.stringify({ segments }),
     });
     return handleResponse<TranscriptData>(res);
+  },
+
+  async getCaptionFonts(): Promise<string[]> {
+    const res = await fetch(`${BASE_URL}/api/captions/fonts`);
+    return handleResponse<string[]>(res);
+  },
+
+  async generateCaptions(projectId: string, config: CaptionConfig): Promise<CaptionGenerateResponse> {
+    const res = await fetch(`${BASE_URL}/api/projects/${projectId}/captions/generate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ config }),
+    });
+    return handleResponse<CaptionGenerateResponse>(res);
+  },
+
+  async updateCaptionTranscript(projectId: string, segments: TranscriptSegment[], config: CaptionConfig): Promise<TranscriptData> {
+    const res = await fetch(`${BASE_URL}/api/projects/${projectId}/captions/transcript`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ segments, config }),
+    });
+    return handleResponse<TranscriptData>(res);
+  },
+
+  getCaptionsUrl(projectId: string): string {
+    return `${BASE_URL}/api/projects/${projectId}/captions/ass`;
+  },
+
+  async renderCaptionedVideo(projectId: string, config: CaptionConfig, startSec = 0, endSec?: number): Promise<{ outputPath: string; encoderUsed: string; eventCount: number }> {
+    const res = await fetch(`${BASE_URL}/api/projects/${projectId}/captions/render`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ startSec, endSec, config }),
+    });
+    return handleResponse<{ outputPath: string; encoderUsed: string; eventCount: number }>(res);
   },
 
   async getClips(projectId: string): Promise<CandidateClip[]> {

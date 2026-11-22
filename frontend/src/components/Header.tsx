@@ -7,8 +7,8 @@ interface HeaderProps {
   settings: SettingsRead | null;
   isRefreshing: boolean;
   onRefresh: () => void;
-  activeTab: 'diagnostics' | 'studio' | 'layout';
-  onTabChange: (tab: 'diagnostics' | 'studio' | 'layout') => void;
+  activeTab: 'diagnostics' | 'studio' | 'layout' | 'captions';
+  onTabChange: (tab: 'diagnostics' | 'studio' | 'layout' | 'captions') => void;
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -74,6 +74,16 @@ export const Header: React.FC<HeaderProps> = ({
               }`}
             >
               Layout Studio
+            </button>
+            <button
+              onClick={() => onTabChange('captions')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                activeTab === 'captions'
+                  ? 'bg-cyan-500/15 text-cyan-400 border border-cyan-500/30'
+                  : 'text-slate-400 hover:text-slate-200'
+              }`}
+            >
+              Caption Studio
             </button>
           </nav>
         </div>

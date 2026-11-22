@@ -790,15 +790,22 @@ class ProjectService:
             raise NotFoundError(f"Project {project_id} not found")
 
         current = json.loads(project.transcript_json or "{}")
-        current["segments"] = [s.model_dump() for s in payload.segments]
+        current["segments"] = [
+            {
+                **segment.model_dump(),
+                "text": " ".join(word.word for word in segment.words) if segment.words else segment.text,
+            }
+            for segment in payload.segments
+        ]
 
         project.transcript_json = json.dumps(current)
         await session.commit()
 
         return TranscriptData(
             language=current.get("language", "en"),
+            language_probability=current.get("language_probability", 1.0),
             duration=current.get("duration", 0.0),
-            segments=payload.segments,
+            segments=[TranscriptSegment(**segment) for segment in current["segments"]],
         )
 
     @classmethod

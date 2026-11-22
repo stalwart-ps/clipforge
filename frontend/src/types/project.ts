@@ -36,6 +36,30 @@ export interface TranscriptData {
   segments: TranscriptSegment[];
 }
 
+export type CaptionPreset = 'hormozi_pop' | 'karaoke_highlight' | 'minimal_clean' | 'gaming_neon' | 'boxed_pill';
+export type CaptionAnimation = 'none' | 'pop' | 'highlight' | 'bounce';
+
+export interface CaptionConfig {
+  preset: CaptionPreset;
+  fontName: string;
+  fontSize: number;
+  primaryColor: string;
+  highlightColor: string;
+  outlineColor: string;
+  outlineWidth: number;
+  shadowDepth: number;
+  marginV: number;
+  maxWordsPerLine: number;
+  allCaps: boolean;
+  animation: CaptionAnimation;
+  profanityMask: boolean;
+}
+
+export interface CaptionGenerateResponse {
+  assPath: string;
+  eventCount: number;
+}
+
 export interface CandidateClip {
   id: string;
   title: string;

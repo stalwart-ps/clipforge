@@ -12,6 +12,7 @@ from app.diagnostics.router import router as diagnostics_router
 from app.framing.router import assets_router, framing_router, profiles_router
 from app.projects.router import router as projects_router
 from app.settings.router import router as settings_router
+from app.captions.router import router as captions_router
 
 
 @asynccontextmanager
@@ -49,6 +50,7 @@ def create_app() -> FastAPI:
     app.include_router(profiles_router)
     app.include_router(assets_router)
     app.include_router(framing_router)
+    app.include_router(captions_router)
 
     # Dynamic static file and SPA serving
     @app.get("/{full_path:path}", include_in_schema=False)

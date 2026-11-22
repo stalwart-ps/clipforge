@@ -16,6 +16,7 @@ from fastapi import (
 from fastapi.responses import FileResponse, StreamingResponse
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.captions.service import saved_config, write_project_ass
 from app.core.db import get_db_session
 from app.core.ws_manager import ws_manager
 from app.projects.schemas import (
@@ -130,7 +131,9 @@ async def update_project_transcript(
     session: AsyncSession = Depends(get_db_session),
 ) -> TranscriptData:
     """Save user typo edits into SQLite without re-transcribing."""
-    return await ProjectService.update_transcript(session, project_id, payload)
+    updated = await ProjectService.update_transcript(session, project_id, payload)
+    write_project_ass(project_id, updated, saved_config(project_id))
+    return updated
 
 
 @router.get("/{project_id}/clips", response_model=list[CandidateClip], status_code=status.HTTP_200_OK)
