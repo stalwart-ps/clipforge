@@ -207,6 +207,10 @@ async def _resolve_framing_config(project_id: str, config: FramingConfig) -> Fra
                             corner=data.get("watermarkCorner", "bottom_right"),
                         )
 
+                    p_fit = data.get("paneFitMode") or data.get("pane_fit_mode")
+                    if p_fit and p_fit in ("fill", "fit"):
+                        updates["pane_fit_mode"] = p_fit
+
                     if updates:
                         config = config.model_copy(update=updates)
     except Exception as e:

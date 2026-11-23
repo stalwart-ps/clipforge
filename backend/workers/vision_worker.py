@@ -15,7 +15,75 @@ import sys
 from pathlib import Path
 
 
-def detect_regions(video_path: str, time_sec: float = 1.0) -> dict:
+def _expand_face_box(face: dict, mode: str, tightness: str = "medium") -> dict:
+    fx = float(face["x"])
+    fy = float(face["y"])
+    fw = float(face["w"])
+    fh = float(face["h"])
+
+    mult = 0.75 if tightness == "close" else (1.25 if tightness == "wide" else 1.0)
+
+    if mode in ("podcast", "talking_head", "reaction"):
+        # Expand horizontally to ~3.4 * fw centered on face
+        w_mult = 3.4 * mult
+        headroom_mult = 1.15 * mult
+        torso_mult = 3.6 * mult
+
+        new_w = min(1.0, max(0.05, fw * w_mult))
+        cx = fx + fw / 2.0
+        new_x = max(0.0, min(1.0 - new_w, cx - new_w / 2.0))
+
+        top = fy - headroom_mult * fh
+        bot = (fy + fh) + torso_mult * fh
+        new_y = max(0.0, top)
+        new_h = min(1.0 - new_y, max(0.05, bot - new_y))
+
+        return {
+            "x": round(new_x, 4),
+            "y": round(new_y, 4),
+            "w": round(new_w, 4),
+            "h": round(new_h, 4),
+        }
+    else:
+        # Gaming / Screen-Presenter webcam crop
+        w_mult = 2.8 * mult
+        headroom_mult = 0.8 * mult
+        torso_mult = 1.8 * mult
+
+        new_w = min(1.0, max(0.05, fw * w_mult))
+        new_h = min(1.0, max(0.05, fh * (1.0 + headroom_mult + torso_mult)))
+        cx = fx + fw / 2.0
+        cy = fy + fh / 2.0
+
+        # Anchor towards nearest corner/edge
+        if cx < 0.35:
+            new_x = max(0.0, min(fx - 0.2 * new_w, 1.0 - new_w))
+        elif cx > 0.65:
+            new_x = max(0.0, min(1.0 - new_w, fx + fw + 0.2 * new_w - new_w))
+        else:
+            new_x = max(0.0, min(1.0 - new_w, cx - new_w / 2.0))
+
+        if cy < 0.35:
+            new_y = max(0.0, min(fy - headroom_mult * fh, 1.0 - new_h))
+        elif cy > 0.65:
+            new_y = max(0.0, min(1.0 - new_h, (fy + fh + torso_mult * fh) - new_h))
+        else:
+            new_y = max(0.0, min(1.0 - new_h, fy - headroom_mult * fh))
+
+        return {
+            "x": round(new_x, 4),
+            "y": round(new_y, 4),
+            "w": round(new_w, 4),
+            "h": round(new_h, 4),
+        }
+
+
+def detect_regions(
+    video_path: str,
+    time_sec: float = 1.0,
+    framing_mode: str = "gaming",
+    tightness: str = "medium",
+) -> dict:
     """
     Open a single frame at time_sec and detect faces using MediaPipe Face Detection.
 
@@ -94,55 +162,63 @@ def detect_regions(video_path: str, time_sec: float = 1.0) -> dict:
     avg_confidence = sum(f["confidence"] for f in faces_data) / face_count if face_count else 0.0
 
     # -------------------------------------------------------------------------
-    # Heuristic: Identify the "facecam" box (small face, usually in a corner)
-    # vs a "presenter" face that fills much of the frame.
-    # In gaming streams the facecam overlay typically occupies <25% of frame area.
+    # Mode-aware Smart Person / Torso Expansion
     # -------------------------------------------------------------------------
     facecam_box = None
     gameplay_box = None
-    mode_suggestion = "gaming"
+    mode_suggestion = framing_mode
 
     if face_count == 0:
         # No face → fullscreen gameplay / no-face fallback
         gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
-        mode_suggestion = "gaming"
-    elif face_count == 1:
-        f = faces_data[0]
-        face_area = f["w"] * f["h"]
-        if face_area < 0.20:
-            # Small corner overlay → gaming mode: facecam + rest is gameplay
-            facecam_box = {"x": f["x"], "y": f["y"], "w": f["w"], "h": f["h"]}
-            # Gameplay = whole frame; user can manually crop
-            gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
-            mode_suggestion = "gaming"
-        elif face_area < 0.60:
-            # Medium-sized face → talking head mode
-            # Pad the box by 20% to include shoulders
-            pad_x = min(0.1, f["x"])
-            pad_y = min(0.05, f["y"])
-            facecam_box = {
-                "x": max(0.0, f["x"] - pad_x),
-                "y": max(0.0, f["y"] - pad_y),
-                "w": min(1.0 - f["x"] + pad_x, f["w"] + 2 * pad_x),
-                "h": min(1.0 - f["y"] + pad_y, f["h"] * 1.5),
-            }
-            mode_suggestion = "talking_head"
+        mode_suggestion = framing_mode or "gaming"
+    elif framing_mode == "podcast":
+        mode_suggestion = "podcast"
+        if face_count >= 2:
+            # Sort left-to-right by horizontal position
+            faces_sorted = sorted(faces_data, key=lambda f: f["x"])
+            f1, f2 = faces_sorted[0], faces_sorted[1]
+            b1 = _expand_face_box(f1, "podcast", tightness)
+            b2 = _expand_face_box(f2, "podcast", tightness)
+
+            # Prevent heavy horizontal overlap if they sit close together
+            if b1["x"] + b1["w"] > b2["x"]:
+                f1_cx = f1["x"] + f1["w"] / 2.0
+                f2_cx = f2["x"] + f2["w"] / 2.0
+                mid_x = (f1_cx + f2_cx) / 2.0
+                b1["w"] = max(0.08, min(b1["w"], round(mid_x - b1["x"], 4)))
+                b2_w = b2["w"]
+                b2["x"] = round(max(mid_x, b2["x"]), 4)
+                b2["w"] = max(0.08, min(round(1.0 - b2["x"], 4), b2_w))
+
+            facecam_box = b1  # Person 1
+            gameplay_box = b2  # Person 2
         else:
-            # Large face filling most of frame → podcast mode
-            facecam_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
-            mode_suggestion = "podcast"
-    elif face_count == 2:
-        # Two faces → podcast mode (sorted left-to-right)
-        faces_sorted = sorted(faces_data, key=lambda f: f["x"])
-        # facecam = left face
-        facecam_box = {k: faces_sorted[0][k] for k in ("x", "y", "w", "h")}
-        gameplay_box = {k: faces_sorted[1][k] for k in ("x", "y", "w", "h")}
-        mode_suggestion = "podcast"
+            facecam_box = _expand_face_box(faces_data[0], "podcast", tightness)
+            gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+    elif framing_mode == "talking_head":
+        mode_suggestion = "talking_head"
+        f = max(faces_data, key=lambda f: f["w"] * f["h"])
+        facecam_box = _expand_face_box(f, "talking_head", tightness)
+        gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+    elif framing_mode == "reaction":
+        mode_suggestion = "reaction"
+        f = max(faces_data, key=lambda f: f["w"] * f["h"])
+        facecam_box = _expand_face_box(f, "reaction", tightness)
+        gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+    elif framing_mode in ("gaming", "screen_presenter"):
+        mode_suggestion = framing_mode
+        # Expand detected face into realistic webcam/presenter crop
+        # In gaming/presenter, do NOT assign a second face as gameplay.
+        f = max(faces_data, key=lambda f: f["confidence"])
+        facecam_box = _expand_face_box(f, framing_mode, tightness)
+        gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
     else:
-        # 3+ faces (panel / group) → podcast with largest face as facecam
-        biggest = max(faces_data, key=lambda f: f["w"] * f["h"])
-        facecam_box = {k: biggest[k] for k in ("x", "y", "w", "h")}
-        mode_suggestion = "podcast"
+        # Generic fallback
+        f = faces_data[0]
+        facecam_box = _expand_face_box(f, "gaming", tightness)
+        gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
+        mode_suggestion = "gaming" if face_count <= 1 else "podcast"
 
     return {
         "face_count": face_count,
@@ -513,6 +589,8 @@ def main():
     parser.add_argument("--track-end", type=float, default=None)
     parser.add_argument("--track-facecam", action="store_true", default=False)
     parser.add_argument("--facecam-box", type=str, default=None)
+    parser.add_argument("--framing-mode", type=str, default="gaming")
+    parser.add_argument("--tightness", type=str, default="medium")
     args = parser.parse_args()
 
     try:
@@ -522,7 +600,12 @@ def main():
         elif args.track_start is not None and args.track_end is not None:
             result = detect_active_speaker_tracks(args.video_path, args.track_start, args.track_end)
         else:
-            result = detect_regions(args.video_path, args.time_sec)
+            result = detect_regions(
+                args.video_path,
+                args.time_sec,
+                framing_mode=args.framing_mode,
+                tightness=args.tightness,
+            )
     except Exception as e:
         result = {
             "face_count": 0,

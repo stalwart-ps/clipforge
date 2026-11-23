@@ -1,6 +1,7 @@
 import React, {
   useCallback,
   useEffect,
+  useMemo,
   useRef,
   useState,
 } from 'react';
@@ -29,6 +30,7 @@ import {
   FramingConfig,
   FramingMode,
   LayoutTemplate,
+  PaneFitMode,
   ProjectRead,
   ProjectSummary,
   RegionBox,
@@ -41,6 +43,116 @@ const ASPECT_DIMS: Record<AspectRatio, [number, number]> = {
   '9:16': [1080, 1920],
   '1:1': [1080, 1080],
   '16:9': [1920, 1080],
+};
+
+export interface ModeTemplateOption {
+  key: LayoutTemplate;
+  label: string;
+  desc: string;
+}
+
+export interface ModeMeta {
+  key: FramingMode;
+  icon: string;
+  label: string;
+  r1Name: string;
+  r2Name: string;
+  r1Icon: string;
+  r2Icon: string;
+  defaultSplit: number;
+  defaultTemplate: LayoutTemplate;
+  templates: ModeTemplateOption[];
+  hideR2ByDefault?: boolean;
+}
+
+export const MODE_METAS: Record<FramingMode, ModeMeta> = {
+  podcast: {
+    key: 'podcast',
+    icon: '🎙️',
+    label: 'Podcast',
+    r1Name: 'Person 1',
+    r2Name: 'Person 2',
+    r1Icon: '🎙️',
+    r2Icon: '🎙️',
+    defaultSplit: 50,
+    defaultTemplate: 'split_vertical',
+    templates: [
+      { key: 'split_vertical', label: '50/50 Stacked Split', desc: 'Person 1 top, Person 2 bottom' },
+      { key: 'podcast_active_speaker', label: 'Active Speaker 9:16', desc: 'Fullscreen auto-cutting between hosts' },
+      { key: 'side_by_side_blur', label: 'Side-by-Side Dual', desc: 'Dual portrait panes over blurred fill' },
+      { key: 'wide_plus_dual', label: 'Wide + Dual Split', desc: 'Overview wide top shot + hosts side-by-side bottom' },
+      { key: 'fullscreen_crop', label: 'Single Speaker Portrait', desc: 'Focused 9:16 portrait crop of main speaker' },
+    ],
+  },
+  gaming: {
+    key: 'gaming',
+    icon: '🎮',
+    label: 'Gaming',
+    r1Name: 'Facecam',
+    r2Name: 'Gameplay',
+    r1Icon: '📷',
+    r2Icon: '🎮',
+    defaultSplit: 35,
+    defaultTemplate: 'split_vertical',
+    templates: [
+      { key: 'split_vertical', label: 'Facecam Top / Game Bottom', desc: 'Standard streamer stacked vertical split' },
+      { key: 'split_inverted', label: 'Game Top / Facecam Bottom', desc: 'Gameplay on top, facecam on bottom' },
+      { key: 'pip', label: 'Picture-in-Picture', desc: 'Fullscreen gameplay with corner webcam' },
+      { key: 'blurred_fill', label: 'Blurred Fill', desc: 'Centered gameplay over blurred pillarbox' },
+      { key: 'fullscreen_crop', label: 'Fullscreen Crop', desc: 'Fill entire frame from gameplay region' },
+    ],
+  },
+  talking_head: {
+    key: 'talking_head',
+    icon: '🗣️',
+    label: 'Talking Head',
+    r1Name: 'Speaker',
+    r2Name: 'Region 2 (Dual Layout)',
+    r1Icon: '🗣️',
+    r2Icon: '👥',
+    defaultSplit: 50,
+    defaultTemplate: 'fullscreen_crop',
+    hideR2ByDefault: true,
+    templates: [
+      { key: 'fullscreen_crop', label: '9:16 Upper-Body Portrait', desc: 'Centered upper-body portrait framing' },
+      { key: 'punch_in_zoom', label: 'Punch-In Zoom Cuts', desc: 'Subtle rhythmic 100%→110% zoom cuts every 6s' },
+      { key: 'blurred_fill', label: 'Blurred Fill', desc: 'Portrait crop over dynamic blurred background' },
+    ],
+  },
+  screen_presenter: {
+    key: 'screen_presenter',
+    icon: '🖥️',
+    label: 'Screen Presenter',
+    r1Name: 'Presenter',
+    r2Name: 'Screen / Slides',
+    r1Icon: '🧑‍🏫',
+    r2Icon: '🖥️',
+    defaultSplit: 60,
+    defaultTemplate: 'split_vertical',
+    templates: [
+      { key: 'split_vertical', label: 'Screen Top / Presenter Bottom', desc: 'Slides on top (60%), presenter webcam bottom' },
+      { key: 'split_inverted', label: 'Presenter Top / Screen Bottom', desc: 'Presenter webcam top, slides on bottom' },
+      { key: 'pip', label: 'Screen + Presenter PiP', desc: 'Fullscreen slides with presenter corner PiP' },
+      { key: 'blurred_fill', label: 'Blurred Fill', desc: 'Pillarboxed presentation over blurred backdrop' },
+    ],
+  },
+  reaction: {
+    key: 'reaction',
+    icon: '😂',
+    label: 'Reaction',
+    r1Name: 'Reactor',
+    r2Name: 'Original Video',
+    r1Icon: '😂',
+    r2Icon: '🎬',
+    defaultSplit: 40,
+    defaultTemplate: 'split_vertical',
+    templates: [
+      { key: 'split_vertical', label: 'Reactor Top / Video Bottom', desc: 'Reactor webcam top (40%), original video bottom' },
+      { key: 'split_inverted', label: 'Video Top / Reactor Bottom', desc: 'Original video top (60%), reactor on bottom' },
+      { key: 'pip', label: 'Video + Reactor PiP', desc: 'Original video full frame with reactor PiP overlay' },
+      { key: 'side_by_side_blur', label: 'Side-by-Side Dual', desc: 'Reactor left and video right side-by-side' },
+    ],
+  },
 };
 
 // Safe-zone overlays (normalized fractions of output canvas)
@@ -129,6 +241,9 @@ export const LayoutStudio: React.FC = () => {
   });
   const [faceDetected, setFaceDetected] = useState<boolean | null>(null);
   const [dynamicFacecamTracking, setDynamicFacecamTracking] = useState<boolean>(false);
+  const [paneFitMode, setPaneFitMode] = useState<PaneFitMode>('fill');
+  const [tightness, setTightness] = useState<'close' | 'medium' | 'wide'>('medium');
+  const currentMeta = useMemo(() => MODE_METAS[framingMode] || MODE_METAS.gaming, [framingMode]);
 
   // ── Safe-zone overlay ─────────────────────────────────────────────────────
   const [safeZoneKey, setSafeZoneKey] = useState<SafeZoneKey>(null);
@@ -205,6 +320,8 @@ export const LayoutStudio: React.FC = () => {
         if (typeof lc.watermarkPath === 'string' || lc.watermarkPath === null) setWatermarkPath(lc.watermarkPath as string | null);
         if (typeof lc.dynamicFacecamTracking === 'boolean') setDynamicFacecamTracking(lc.dynamicFacecamTracking);
         else if (typeof lc.dynamic_facecam_tracking === 'boolean') setDynamicFacecamTracking(lc.dynamic_facecam_tracking);
+        if (lc.paneFitMode) setPaneFitMode(lc.paneFitMode as PaneFitMode);
+        else if (lc.pane_fit_mode) setPaneFitMode(lc.pane_fit_mode as PaneFitMode);
       }
     } finally {
       setLoadingProject(false);
@@ -238,6 +355,7 @@ export const LayoutStudio: React.FC = () => {
           aspectRatio,
           layoutTemplate,
           splitRatio,
+          paneFitMode,
           facecamBox,
           gameplayBox,
           watermarkOpacity,
@@ -255,6 +373,7 @@ export const LayoutStudio: React.FC = () => {
     aspectRatio,
     layoutTemplate,
     splitRatio,
+    paneFitMode,
     facecamBox,
     gameplayBox,
     watermarkOpacity,
@@ -371,9 +490,13 @@ export const LayoutStudio: React.FC = () => {
       });
     };
 
-    if (gameplayBox) drawBox(gameplayBox, 'rgba(0,210,255,1)', '🎮 Gameplay');
-    if (facecamBox) drawBox(facecamBox, 'rgba(255,100,220,1)', '📷 Facecam');
-  }, [imgLoaded, facecamBox, gameplayBox, activeProject]);
+    const meta = MODE_METAS[framingMode] || MODE_METAS.gaming;
+    const isDual = layoutTemplate === 'split_vertical' || layoutTemplate === 'split_inverted' || layoutTemplate === 'side_by_side_blur' || layoutTemplate === 'wide_plus_dual';
+    const showR2 = !meta.hideR2ByDefault || isDual;
+
+    if (gameplayBox && showR2) drawBox(gameplayBox, 'rgba(0,210,255,1)', meta.r2Name);
+    if (facecamBox) drawBox(facecamBox, 'rgba(255,100,220,1)', meta.r1Name);
+  }, [imgLoaded, facecamBox, gameplayBox, activeProject, framingMode, layoutTemplate]);
 
   const drawCanvas = useCallback(() => {
     if (canvasRef.current) {
@@ -412,20 +535,38 @@ export const LayoutStudio: React.FC = () => {
       ctx.fillText('Output preview', W / 2, H / 2);
       return;
     }
+
     const drawRegion = (box: RegionBox | null, dx: number, dy: number, dw: number, dh: number) => {
       if (!box) return;
       const sx = box.x * image.naturalWidth;
       const sy = box.y * image.naturalHeight;
-      const sw = box.w * image.naturalWidth;
-      const sh = box.h * image.naturalHeight;
-      const scale = Math.min(dw / sw, dh / sh);
-      const rw = sw * scale;
-      const rh = sh * scale;
-      ctx.drawImage(image, sx, sy, sw, sh, dx + (dw - rw) / 2, dy + (dh - rh) / 2, rw, rh);
+      const sw = Math.max(1, box.w * image.naturalWidth);
+      const sh = Math.max(1, box.h * image.naturalHeight);
+
+      if (paneFitMode === 'fill') {
+        // object-cover: scale to cover dw:dh without black bars, center cropped
+        const scale = Math.max(dw / sw, dh / sh);
+        const rw = sw * scale;
+        const rh = sh * scale;
+        ctx.save();
+        ctx.beginPath();
+        ctx.rect(dx, dy, dw, dh);
+        ctx.clip();
+        ctx.drawImage(image, sx, sy, sw, sh, dx + (dw - rw) / 2, dy + (dh - rh) / 2, rw, rh);
+        ctx.restore();
+      } else {
+        // object-contain: scale to fit inside dw:dh, padded with black
+        const scale = Math.min(dw / sw, dh / sh);
+        const rw = sw * scale;
+        const rh = sh * scale;
+        ctx.fillStyle = '#000000';
+        ctx.fillRect(dx, dy, dw, dh);
+        ctx.drawImage(image, sx, sy, sw, sh, dx + (dw - rw) / 2, dy + (dh - rh) / 2, rw, rh);
+      }
     };
 
     if (layoutTemplate === 'split_vertical') {
-      const topPaneH = H * (splitRatio / 100);
+      const topPaneH = Math.round(H * (splitRatio / 100));
       const botPaneH = H - topPaneH;
       const topBox = framingMode === 'screen_presenter'
         ? (gameplayBox ?? { x: 0, y: 0, w: 1, h: 0.65 })
@@ -438,6 +579,33 @@ export const LayoutStudio: React.FC = () => {
       drawRegion(botBox, 0, topPaneH, W, botPaneH);
 
       // Split ratio divider line on Output canvas
+      ctx.setLineDash([5, 4]);
+      ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+      ctx.lineWidth = 1.5;
+      ctx.beginPath();
+      ctx.moveTo(0, topPaneH);
+      ctx.lineTo(W, topPaneH);
+      ctx.stroke();
+      ctx.setLineDash([]);
+      ctx.fillStyle = 'rgba(0,0,0,0.65)';
+      ctx.fillRect(4, topPaneH - 14, 82, 13);
+      ctx.fillStyle = 'rgba(255,255,255,0.95)';
+      ctx.font = '10px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(`${splitRatio}% / ${100 - splitRatio}%`, 8, topPaneH - 4);
+    } else if (layoutTemplate === 'split_inverted') {
+      const topPaneH = Math.round(H * (splitRatio / 100));
+      const botPaneH = H - topPaneH;
+      const topBox = framingMode === 'screen_presenter'
+        ? (facecamBox ?? { x: 0, y: 0, w: 0.3, h: 0.25 })
+        : (gameplayBox ?? { x: 0, y: 0, w: 1, h: 1.0 });
+      const botBox = framingMode === 'screen_presenter'
+        ? (gameplayBox ?? { x: 0, y: 0, w: 1, h: 0.65 })
+        : (facecamBox ?? { x: 0, y: 0, w: 0.3, h: 0.25 });
+
+      drawRegion(topBox, 0, 0, W, topPaneH);
+      drawRegion(botBox, 0, topPaneH, W, botPaneH);
+
       ctx.setLineDash([5, 4]);
       ctx.strokeStyle = 'rgba(255,255,255,0.7)';
       ctx.lineWidth = 1.5;
@@ -467,6 +635,71 @@ export const LayoutStudio: React.FC = () => {
       ctx.strokeStyle = 'rgba(255,100,220,0.9)';
       ctx.lineWidth = 1.5;
       ctx.strokeRect(pipX, pipY, pipW, pipH);
+    } else if (layoutTemplate === 'side_by_side_blur') {
+      // Blurred background fills canvas
+      ctx.save();
+      ctx.filter = 'blur(16px)';
+      const bgScale = Math.max(W / image.naturalWidth, H / image.naturalHeight);
+      const bgW = image.naturalWidth * bgScale;
+      const bgH = image.naturalHeight * bgScale;
+      ctx.drawImage(image, (W - bgW) / 2, (H - bgH) / 2, bgW, bgH);
+      ctx.restore();
+
+      const leftW = Math.round(W / 2);
+      const rightW = W - leftW;
+      const paneH = Math.min(H, Math.round(leftW * (16 / 9)));
+      const paneY = Math.round((H - paneH) / 2);
+
+      const p1 = facecamBox ?? { x: 0, y: 0, w: 0.5, h: 1 };
+      const p2 = gameplayBox ?? { x: 0.5, y: 0, w: 0.5, h: 1 };
+      drawRegion(p1, 0, paneY, leftW, paneH);
+      drawRegion(p2, leftW, paneY, rightW, paneH);
+
+      // Border divider
+      ctx.strokeStyle = 'rgba(255,255,255,0.4)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(leftW, paneY);
+      ctx.lineTo(leftW, paneY + paneH);
+      ctx.stroke();
+    } else if (layoutTemplate === 'wide_plus_dual') {
+      const topH = Math.round(H * 0.40);
+      const botH = H - topH;
+      const leftW = Math.round(W / 2);
+      const rightW = W - leftW;
+
+      const wideBox = gameplayBox ?? { x: 0, y: 0, w: 1, h: 1 };
+      const p1 = facecamBox ?? { x: 0, y: 0, w: 0.5, h: 1 };
+      const p2 = gameplayBox ?? { x: 0.5, y: 0, w: 0.5, h: 1 };
+
+      drawRegion(wideBox, 0, 0, W, topH);
+      drawRegion(p1, 0, topH, leftW, botH);
+      drawRegion(p2, leftW, topH, rightW, botH);
+
+      ctx.strokeStyle = 'rgba(255,255,255,0.5)';
+      ctx.lineWidth = 1;
+      ctx.beginPath();
+      ctx.moveTo(0, topH); ctx.lineTo(W, topH);
+      ctx.moveTo(leftW, topH); ctx.lineTo(leftW, H);
+      ctx.stroke();
+    } else if (layoutTemplate === 'podcast_active_speaker') {
+      const p1 = facecamBox ?? gameplayBox ?? { x: 0, y: 0, w: 1, h: 1 };
+      drawRegion(p1, 0, 0, W, H);
+
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(8, 8, 180, 22);
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText('🎙️ Active Speaker (Auto-Cut)', 14, 23);
+    } else if (layoutTemplate === 'punch_in_zoom') {
+      const spk = facecamBox ?? gameplayBox ?? { x: 0, y: 0, w: 1, h: 1 };
+      drawRegion(spk, 0, 0, W, H);
+
+      ctx.fillStyle = 'rgba(0,0,0,0.7)';
+      ctx.fillRect(8, 8, 190, 22);
+      ctx.fillStyle = '#a855f7';
+      ctx.font = 'bold 10px monospace';
+      ctx.fillText('⚡ Punch-In Zoom Cuts (110%)', 14, 23);
     } else if (layoutTemplate === 'blurred_fill') {
       // Blurred background fills/covers the canvas
       ctx.save();
@@ -522,6 +755,7 @@ export const LayoutStudio: React.FC = () => {
     aspectRatio,
     framingMode,
     layoutTemplate,
+    paneFitMode,
     facecamBox,
     gameplayBox,
     splitRatio,
@@ -540,11 +774,18 @@ export const LayoutStudio: React.FC = () => {
   const hitTest = useCallback(
     (cx: number, cy: number, W: number, H: number): { boxKey: 'facecam' | 'gameplay'; action: DragAction } | null => {
       const HANDLE_HIT = 14;
+      const meta = MODE_METAS[framingMode] || MODE_METAS.gaming;
+      const isDual = layoutTemplate === 'split_vertical' || layoutTemplate === 'split_inverted' || layoutTemplate === 'side_by_side_blur' || layoutTemplate === 'wide_plus_dual';
+      const showR2 = !meta.hideR2ByDefault || isDual;
 
-      for (const [key, box] of [
-        ['facecam', facecamBox] as const,
-        ['gameplay', gameplayBox] as const,
-      ]) {
+      const candidates: Array<['facecam' | 'gameplay', RegionBox | null]> = [
+        ['facecam', facecamBox],
+      ];
+      if (showR2) {
+        candidates.push(['gameplay', gameplayBox]);
+      }
+
+      for (const [key, box] of candidates) {
         if (!box) continue;
         const { x, y, w, h } = boxToPx(box, W, H);
 
@@ -569,7 +810,7 @@ export const LayoutStudio: React.FC = () => {
       }
       return null;
     },
-    [facecamBox, gameplayBox]
+    [facecamBox, gameplayBox, framingMode, layoutTemplate]
   );
 
   const handlePointerDown = useCallback((
@@ -660,17 +901,35 @@ export const LayoutStudio: React.FC = () => {
     setIsDetecting(true);
     setDetectResult(null);
     try {
-      const result = await api.autoDetectRegions(activeProject.id, frameSec);
+      const result = await api.autoDetectRegions(activeProject.id, frameSec, framingMode, tightness);
       setDetectResult(result);
       if (result.facecamBox) setFacecamBox(result.facecamBox);
       else if (result.faceCount === 0) setFacecamBox(null);
       if (result.gameplayBox) setGameplayBox(result.gameplayBox);
       setFaceDetected(result.faceCount > 0);
-      if (result.modeSuggestion) setFramingMode(result.modeSuggestion);
+      if (result.modeSuggestion) {
+        setFramingMode(result.modeSuggestion);
+        const meta = MODE_METAS[result.modeSuggestion];
+        if (meta && !meta.templates.some((t) => t.key === layoutTemplate)) {
+          setLayoutTemplate(meta.defaultTemplate);
+          setSplitRatio(meta.defaultSplit);
+        }
+      }
     } catch (err) {
       console.error('Auto-detect failed:', err);
     } finally {
       setIsDetecting(false);
+    }
+  };
+
+  const handleFramingModeClick = (newMode: FramingMode) => {
+    setFramingMode(newMode);
+    const meta = MODE_METAS[newMode];
+    if (meta) {
+      if (!meta.templates.some((t) => t.key === layoutTemplate)) {
+        setLayoutTemplate(meta.defaultTemplate);
+      }
+      setSplitRatio(meta.defaultSplit);
     }
   };
 
@@ -687,6 +946,7 @@ export const LayoutStudio: React.FC = () => {
         facecamBox,
         gameplayBox,
         splitRatio,
+        paneFitMode,
         watermark: watermarkPath ? { path: watermarkPath, corner: watermarkCorner, scale: watermarkScale, opacity: watermarkOpacity } : null,
         ollamaPrompt: null,
         captionStyle: 'hormozi_pop',
@@ -706,6 +966,9 @@ export const LayoutStudio: React.FC = () => {
     setAspectRatio(profile.aspectRatio);
     setLayoutTemplate(profile.layoutTemplate);
     setSplitRatio(profile.splitRatio);
+    if (profile.paneFitMode) {
+      setPaneFitMode(profile.paneFitMode);
+    }
     if (profile.facecamBox) setFacecamBox(profile.facecamBox);
     else setFacecamBox(null);
     setFaceDetected(profile.facecamBox ? true : null);
@@ -737,6 +1000,7 @@ export const LayoutStudio: React.FC = () => {
       facecamBox,
       gameplayBox,
       splitRatio,
+      paneFitMode,
       watermark: watermarkPath ? { path: watermarkPath, corner: watermarkCorner, scale: watermarkScale, opacity: watermarkOpacity } : null,
       faceDetected,
       dynamicFacecamTracking,
@@ -841,18 +1105,33 @@ export const LayoutStudio: React.FC = () => {
               <div className="flex items-center gap-2">
                 <button
                   type="button"
-                  onClick={() => { setFacecamBox({ x: 0.0, y: 0.0, w: 0.3, h: 0.25 }); setFaceDetected(true); }}
+                  onClick={() => {
+                    if (framingMode === 'podcast') {
+                      setFacecamBox({ x: 0.1, y: 0.1, w: 0.35, h: 0.45 });
+                    } else {
+                      setFacecamBox({ x: 0.1, y: 0.1, w: 0.35, h: 0.45 });
+                    }
+                    setFaceDetected(true);
+                  }}
                   className="px-2 py-1 text-[11px] font-mono rounded border border-fuchsia-700 text-fuchsia-400 hover:bg-fuchsia-950/70 transition-all"
                 >
-                  Reset Face
+                  Reset {currentMeta.r1Name}
                 </button>
-                <button
-                  type="button"
-                  onClick={() => setGameplayBox({ x: 0.0, y: 0.0, w: 1.0, h: 1.0 })}
-                  className="px-2 py-1 text-[11px] font-mono rounded border border-cyan-700 text-cyan-400 hover:bg-cyan-950/70 transition-all"
-                >
-                  Reset Game
-                </button>
+                {!(framingMode === 'talking_head' && (layoutTemplate === 'fullscreen_crop' || layoutTemplate === 'punch_in_zoom')) && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      if (framingMode === 'podcast') {
+                        setGameplayBox({ x: 0.55, y: 0.1, w: 0.35, h: 0.45 });
+                      } else {
+                        setGameplayBox({ x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+                      }
+                    }}
+                    className="px-2 py-1 text-[11px] font-mono rounded border border-cyan-700 text-cyan-400 hover:bg-cyan-950/70 transition-all"
+                  >
+                    Reset {currentMeta.r2Name}
+                  </button>
+                )}
                 <button
                   type="button"
                   onClick={() => { setFacecamBox(null); setGameplayBox(null); }}
@@ -860,6 +1139,19 @@ export const LayoutStudio: React.FC = () => {
                 >
                   Clear
                 </button>
+                <div className="flex items-center gap-1 pl-1 border-l border-slate-800">
+                  <span className="text-[10px] font-mono text-slate-400">Tightness:</span>
+                  <select
+                    value={tightness}
+                    onChange={(e) => setTightness(e.target.value as 'close' | 'medium' | 'wide')}
+                    className="bg-surface border border-violet-700/80 rounded px-1.5 py-1 text-[11px] font-mono text-violet-300 focus:outline-none"
+                    title="Person Framing Tightness for Auto-Detect"
+                  >
+                    <option value="close">Close-Up</option>
+                    <option value="medium">Medium</option>
+                    <option value="wide">Wide</option>
+                  </select>
+                </div>
                 <button
                   type="button"
                   onClick={handleAutoDetect}
@@ -899,14 +1191,16 @@ export const LayoutStudio: React.FC = () => {
             {/* Region Canvas Bottom Status Bar */}
             <div className="flex flex-wrap items-center justify-between gap-3 pt-1 text-[11px] font-mono text-slate-400">
               <div className="flex items-center gap-3">
-                <span className="flex items-center gap-1.5 text-cyan-400">
-                  <span className="w-2 h-2 rounded-full bg-cyan-400 inline-block" />
-                  🎮 Gameplay: {gameplayBox ? `x:${(gameplayBox.x * 100).toFixed(0)}% y:${(gameplayBox.y * 100).toFixed(0)}% w:${(gameplayBox.w * 100).toFixed(0)}% h:${(gameplayBox.h * 100).toFixed(0)}%` : 'none'}
-                </span>
                 <span className="flex items-center gap-1.5 text-fuchsia-400">
                   <span className="w-2 h-2 rounded-full bg-fuchsia-400 inline-block" />
-                  📷 Facecam: {facecamBox ? `x:${(facecamBox.x * 100).toFixed(0)}% y:${(facecamBox.y * 100).toFixed(0)}% w:${(facecamBox.w * 100).toFixed(0)}% h:${(facecamBox.h * 100).toFixed(0)}%` : 'none'}
+                  {currentMeta.r1Icon} {currentMeta.r1Name}: {facecamBox ? `x:${(facecamBox.x * 100).toFixed(0)}% y:${(facecamBox.y * 100).toFixed(0)}% w:${(facecamBox.w * 100).toFixed(0)}% h:${(facecamBox.h * 100).toFixed(0)}%` : 'none'}
                 </span>
+                {!(framingMode === 'talking_head' && (layoutTemplate === 'fullscreen_crop' || layoutTemplate === 'punch_in_zoom')) && (
+                  <span className="flex items-center gap-1.5 text-cyan-400">
+                    <span className="w-2 h-2 rounded-full bg-cyan-400 inline-block" />
+                    {currentMeta.r2Icon} {currentMeta.r2Name}: {gameplayBox ? `x:${(gameplayBox.x * 100).toFixed(0)}% y:${(gameplayBox.y * 100).toFixed(0)}% w:${(gameplayBox.w * 100).toFixed(0)}% h:${(gameplayBox.h * 100).toFixed(0)}%` : 'none'}
+                  </span>
+                )}
               </div>
               <span className="text-slate-500">Drag box to move · Drag any of 4 corner handles to resize</span>
             </div>
@@ -955,23 +1249,52 @@ export const LayoutStudio: React.FC = () => {
               <div className="flex items-center justify-between border-b border-border pb-3">
                 <div>
                   <span className="text-sm font-mono font-bold text-slate-100 block">Output Preview</span>
-                  <span className="text-[10px] font-mono text-cyan-400">{aspectRatio} ({layoutTemplate.replace('_', ' ')})</span>
+                  <span className="text-[10px] font-mono text-cyan-400">{aspectRatio} ({layoutTemplate.replace(/_/g, ' ')})</span>
                 </div>
-                <div className="flex items-center gap-1.5">
-                  {(['9:16', '1:1', '16:9'] as AspectRatio[]).map((ar) => (
+                <div className="flex items-center gap-2">
+                  {/* Pane Fit Mode Toggle */}
+                  <div className="flex items-center rounded border border-border p-0.5 bg-surface">
                     <button
-                      key={ar}
                       type="button"
-                      onClick={() => setAspectRatio(ar)}
-                      className={`px-2 py-0.5 text-[10px] font-mono rounded border transition-all ${
-                        aspectRatio === ar
-                          ? 'border-cyan-500 text-cyan-400 bg-cyan-950 font-bold'
-                          : 'border-border text-slate-400 hover:border-slate-500'
+                      onClick={() => setPaneFitMode('fill')}
+                      className={`px-2 py-0.5 text-[10px] font-mono rounded transition-all ${
+                        paneFitMode === 'fill'
+                          ? 'bg-cyan-500 text-slate-950 font-bold'
+                          : 'text-slate-400 hover:text-slate-200'
                       }`}
+                      title="Fill Pane: Zero black bars, scaled edge-to-edge"
                     >
-                      {ar}
+                      Fill
                     </button>
-                  ))}
+                    <button
+                      type="button"
+                      onClick={() => setPaneFitMode('fit')}
+                      className={`px-2 py-0.5 text-[10px] font-mono rounded transition-all ${
+                        paneFitMode === 'fit'
+                          ? 'bg-cyan-500 text-slate-950 font-bold'
+                          : 'text-slate-400 hover:text-slate-200'
+                      }`}
+                      title="Fit Pane: Black bar letterbox/pillarbox padding"
+                    >
+                      Fit
+                    </button>
+                  </div>
+                  <div className="flex items-center gap-1">
+                    {(['9:16', '1:1', '16:9'] as AspectRatio[]).map((ar) => (
+                      <button
+                        key={ar}
+                        type="button"
+                        onClick={() => setAspectRatio(ar)}
+                        className={`px-2 py-0.5 text-[10px] font-mono rounded border transition-all ${
+                          aspectRatio === ar
+                            ? 'border-cyan-500 text-cyan-400 bg-cyan-950 font-bold'
+                            : 'border-border text-slate-400 hover:border-slate-500'
+                        }`}
+                      >
+                        {ar}
+                      </button>
+                    ))}
+                  </div>
                 </div>
               </div>
 
@@ -1037,7 +1360,7 @@ export const LayoutStudio: React.FC = () => {
                   <button
                     key={key}
                     type="button"
-                    onClick={() => setFramingMode(key)}
+                    onClick={() => handleFramingModeClick(key)}
                     className={`flex flex-col items-center gap-1 p-2 rounded-xl border text-[10px] font-mono transition-all ${
                       framingMode === key
                         ? 'border-cyan-500 text-cyan-400 bg-cyan-950 font-bold'
@@ -1061,32 +1384,30 @@ export const LayoutStudio: React.FC = () => {
 
             {/* Layout Template */}
             <section className="space-y-3 border-t border-border-subtle pt-4">
-              <h2 className="text-xs font-mono font-semibold text-slate-300 uppercase tracking-widest">Layout Template</h2>
-              <div className="grid grid-cols-2 gap-2">
-                {(
-                  [
-                    { key: 'split_vertical', label: 'Split Vertical' },
-                    { key: 'fullscreen_crop', label: 'Fullscreen Crop' },
-                    { key: 'blurred_fill', label: 'Blurred Fill' },
-                    { key: 'pip', label: 'Picture-in-Picture' },
-                  ] as Array<{ key: LayoutTemplate; label: string }>
-                ).map(({ key, label }) => (
+              <div className="flex items-center justify-between">
+                <h2 className="text-xs font-mono font-semibold text-slate-300 uppercase tracking-widest">Layout Template</h2>
+                <span className="text-[10px] font-mono text-cyan-400 capitalize">{framingMode.replace(/_/g, ' ')} Mode</span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                {currentMeta.templates.map(({ key: tKey, label, desc }: ModeTemplateOption) => (
                   <button
-                    key={key}
+                    key={tKey}
                     type="button"
-                    onClick={() => setLayoutTemplate(key)}
-                    className={`p-2 rounded-lg border text-[11px] font-mono text-center transition-all ${
-                      layoutTemplate === key
-                        ? 'border-emerald-500 text-emerald-400 bg-emerald-950 font-semibold'
+                    onClick={() => setLayoutTemplate(tKey)}
+                    title={desc}
+                    className={`p-2 rounded-lg border text-left transition-all ${
+                      layoutTemplate === tKey
+                        ? 'border-emerald-500 text-emerald-400 bg-emerald-950/80 font-semibold shadow'
                         : 'border-border text-slate-400 hover:border-slate-500 bg-surface'
                     }`}
                   >
-                    {label}
+                    <div className="text-[11px] font-mono leading-tight">{label}</div>
+                    <div className="text-[9px] font-mono text-slate-500 mt-0.5 truncate">{desc}</div>
                   </button>
                 ))}
               </div>
 
-              {layoutTemplate === 'split_vertical' && (
+              {(layoutTemplate === 'split_vertical' || layoutTemplate === 'split_inverted' || layoutTemplate === 'wide_plus_dual') && (
                 <div className="space-y-1.5 pt-1">
                   <div className="flex items-center justify-between text-[11px] font-mono text-slate-400">
                     <span>Split Ratio (Top pane %)</span>
@@ -1096,12 +1417,13 @@ export const LayoutStudio: React.FC = () => {
                     type="range"
                     min={10} max={90} value={splitRatio}
                     onChange={(e) => setSplitRatio(Number(e.target.value))}
-                    className="w-full accent-cyan-500"
+                    className="w-full accent-cyan-500 cursor-pointer"
                   />
                   <div className="flex justify-between text-[10px] font-mono text-slate-500">
-                    <span>35/65 (Default)</span>
-                    <span>40/60</span>
-                    <span>50/50</span>
+                    <span>35/65 (Gaming)</span>
+                    <span>40/60 (Reaction)</span>
+                    <span>50/50 (Podcast)</span>
+                    <span>60/40 (Screen)</span>
                   </div>
                 </div>
               )}
@@ -1332,18 +1654,29 @@ export const LayoutStudio: React.FC = () => {
             <div className="flex items-center gap-3">
               <button
                 type="button"
-                onClick={() => { setFacecamBox({ x: 0.0, y: 0.0, w: 0.3, h: 0.25 }); setFaceDetected(true); }}
+                onClick={() => {
+                  setFacecamBox({ x: 0.1, y: 0.1, w: 0.35, h: 0.45 });
+                  setFaceDetected(true);
+                }}
                 className="px-2.5 py-1 text-xs font-mono rounded border border-fuchsia-700 text-fuchsia-400 hover:bg-fuchsia-950 transition-all"
               >
-                Reset Face
+                Reset {currentMeta.r1Name}
               </button>
-              <button
-                type="button"
-                onClick={() => setGameplayBox({ x: 0.0, y: 0.0, w: 1.0, h: 1.0 })}
-                className="px-2.5 py-1 text-xs font-mono rounded border border-cyan-700 text-cyan-400 hover:bg-cyan-950 transition-all"
-              >
-                Reset Game
-              </button>
+              {!(framingMode === 'talking_head' && (layoutTemplate === 'fullscreen_crop' || layoutTemplate === 'punch_in_zoom')) && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    if (framingMode === 'podcast') {
+                      setGameplayBox({ x: 0.55, y: 0.1, w: 0.35, h: 0.45 });
+                    } else {
+                      setGameplayBox({ x: 0.0, y: 0.0, w: 1.0, h: 1.0 });
+                    }
+                  }}
+                  className="px-2.5 py-1 text-xs font-mono rounded border border-cyan-700 text-cyan-400 hover:bg-cyan-950 transition-all"
+                >
+                  Reset {currentMeta.r2Name}
+                </button>
+              )}
               <button
                 type="button"
                 onClick={() => { setFacecamBox(null); setGameplayBox(null); }}
@@ -1387,12 +1720,14 @@ export const LayoutStudio: React.FC = () => {
           {/* Modal Footer with Live Coords */}
           <div className="flex items-center justify-between border-t border-slate-800 pt-3 mt-4 text-xs font-mono">
             <div className="flex items-center gap-6">
-              <span className="text-cyan-400 font-semibold">
-                🎮 Gameplay: {gameplayBox ? `X: ${(gameplayBox.x * 100).toFixed(1)}% | Y: ${(gameplayBox.y * 100).toFixed(1)}% | W: ${(gameplayBox.w * 100).toFixed(1)}% | H: ${(gameplayBox.h * 100).toFixed(1)}%` : 'none'}
-              </span>
               <span className="text-fuchsia-400 font-semibold">
-                📷 Facecam: {facecamBox ? `X: ${(facecamBox.x * 100).toFixed(1)}% | Y: ${(facecamBox.y * 100).toFixed(1)}% | W: ${(facecamBox.w * 100).toFixed(1)}% | H: ${(facecamBox.h * 100).toFixed(1)}%` : 'none'}
+                {currentMeta.r1Icon} {currentMeta.r1Name}: {facecamBox ? `X: ${(facecamBox.x * 100).toFixed(1)}% | Y: ${(facecamBox.y * 100).toFixed(1)}% | W: ${(facecamBox.w * 100).toFixed(1)}% | H: ${(facecamBox.h * 100).toFixed(1)}%` : 'none'}
               </span>
+              {!(framingMode === 'talking_head' && (layoutTemplate === 'fullscreen_crop' || layoutTemplate === 'punch_in_zoom')) && (
+                <span className="text-cyan-400 font-semibold">
+                  {currentMeta.r2Icon} {currentMeta.r2Name}: {gameplayBox ? `X: ${(gameplayBox.x * 100).toFixed(1)}% | Y: ${(gameplayBox.y * 100).toFixed(1)}% | W: ${(gameplayBox.w * 100).toFixed(1)}% | H: ${(gameplayBox.h * 100).toFixed(1)}%` : 'none'}
+                </span>
+              )}
             </div>
             <span className="text-slate-500">Press ESC or click Done to return</span>
           </div>

@@ -3,7 +3,7 @@ import { Activity, ArrowDown, ArrowUp, Check, ChevronDown, Clapperboard, Downloa
 import { api } from '../api/client';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { ExportJob, ExportOptions } from '../types/exports';
-import { CandidateClip, CaptionConfig, FramingConfig, ProjectRead, ProjectSummary } from '../types/project';
+import { CandidateClip, CaptionConfig, FramingConfig, FramingMode, LayoutTemplate, ProjectRead, ProjectSummary } from '../types/project';
 
 type Bounds = { startSec: number; endSec: number };
 
@@ -20,7 +20,42 @@ const DEFAULT_FRAMING: FramingConfig = {
   facecamBox: { x: 0.0, y: 0.0, w: 0.3, h: 0.25 },
   gameplayBox: { x: 0.0, y: 0.0, w: 1.0, h: 1.0 },
   splitRatio: 35,
+  paneFitMode: 'fill',
   watermark: null,
+};
+
+const MODE_LAYOUT_OPTIONS: Record<FramingMode, Array<{ id: LayoutTemplate; label: string }>> = {
+  podcast: [
+    { id: 'split_vertical', label: '50/50 Stacked Split' },
+    { id: 'podcast_active_speaker', label: 'Active Speaker Auto-Cut' },
+    { id: 'side_by_side_blur', label: 'Side-by-Side Dual over Blur' },
+    { id: 'wide_plus_dual', label: 'Wide Top + Dual Bottom' },
+    { id: 'fullscreen_crop', label: 'Single Speaker Portrait' },
+  ],
+  gaming: [
+    { id: 'split_vertical', label: 'Facecam Top / Game Bottom' },
+    { id: 'split_inverted', label: 'Game Top / Facecam Bottom' },
+    { id: 'pip', label: 'Gameplay + Facecam PiP' },
+    { id: 'blurred_fill', label: 'Blurred Fill 9:16' },
+    { id: 'fullscreen_crop', label: 'Fullscreen Crop' },
+  ],
+  talking_head: [
+    { id: 'fullscreen_crop', label: 'Upper-Body Portrait (9:16)' },
+    { id: 'punch_in_zoom', label: 'Punch-In Retention Zoom' },
+    { id: 'blurred_fill', label: 'Blurred Fill' },
+  ],
+  screen_presenter: [
+    { id: 'split_vertical', label: 'Screen Top / Presenter Bottom' },
+    { id: 'split_inverted', label: 'Presenter Top / Screen Bottom' },
+    { id: 'pip', label: 'Full Screen + Presenter PiP' },
+    { id: 'blurred_fill', label: 'Blurred Fill' },
+  ],
+  reaction: [
+    { id: 'split_vertical', label: 'Reactor Top / Video Bottom' },
+    { id: 'split_inverted', label: 'Video Top / Reactor Bottom' },
+    { id: 'pip', label: 'Video + Reactor PiP' },
+    { id: 'side_by_side_blur', label: 'Side-by-Side Dual' },
+  ],
 };
 
 function formatTime(value: number): string {
@@ -265,6 +300,7 @@ export const ExportWorkbench: React.FC = () => {
               const sRatio = typeof lc.splitRatio === 'number' ? lc.splitRatio : (typeof lc.split_ratio === 'number' ? lc.split_ratio : undefined);
               const fBox = lc.facecamBox || lc.facecam_box;
               const gBox = lc.gameplayBox || lc.gameplay_box;
+              const pfm = lc.paneFitMode || lc.pane_fit_mode;
               const dft = typeof lc.dynamicFacecamTracking === 'boolean'
                 ? lc.dynamicFacecamTracking
                 : (typeof lc.dynamic_facecam_tracking === 'boolean' ? lc.dynamic_facecam_tracking : undefined);
@@ -275,6 +311,7 @@ export const ExportWorkbench: React.FC = () => {
                 ...(aRatio ? { aspectRatio: aRatio } : {}),
                 ...(lTemplate ? { layoutTemplate: lTemplate } : {}),
                 ...(sRatio !== undefined ? { splitRatio: sRatio } : {}),
+                ...(pfm ? { paneFitMode: pfm } : {}),
                 ...(fBox ? { facecamBox: fBox } : {}),
                 ...(gBox ? { gameplayBox: gBox } : {}),
                 ...(dft !== undefined ? { dynamicFacecamTracking: dft } : {}),
@@ -460,9 +497,19 @@ export const ExportWorkbench: React.FC = () => {
     catch (cause: any) { setError(cause.message || 'Could not cancel export'); }
   };
 
-  const setFraming = (key: 'framingMode' | 'aspectRatio' | 'layoutTemplate', value: string) => {
+  const setFraming = (
+    key: 'framingMode' | 'aspectRatio' | 'layoutTemplate' | 'paneFitMode',
+    value: string
+  ) => {
     setOptions((current) => {
       const nextConfig = { ...current.framingConfig, [key]: value };
+      if (key === 'framingMode') {
+        const mode = value as FramingMode;
+        const validTemplates = MODE_LAYOUT_OPTIONS[mode];
+        if (validTemplates && !validTemplates.some((t) => t.id === nextConfig.layoutTemplate)) {
+          nextConfig.layoutTemplate = validTemplates[0].id;
+        }
+      }
       if (!nextConfig.facecamBox) {
         nextConfig.facecamBox = { x: 0.0, y: 0.0, w: 0.3, h: 0.25 };
       }
@@ -503,9 +550,9 @@ export const ExportWorkbench: React.FC = () => {
           <span className="font-semibold text-cyan-400">▶ Export will render:</span>
           <span>Project: <strong className="text-white">{project.title}</strong></span>
           <span className="text-slate-500">·</span>
-          <span>Layout: <strong className="text-white">{options.framingConfig.layoutTemplate.replace('_', ' ')}</strong> ({options.framingConfig.aspectRatio})</span>
+          <span>Layout: <strong className="text-white">{options.framingConfig.layoutTemplate.replace(/_/g, ' ')}</strong> ({options.framingConfig.aspectRatio} · {options.framingConfig.paneFitMode || 'fill'})</span>
           <span className="text-slate-500">·</span>
-          <span>Captions: <strong className="text-white">{options.burnCaptions ? options.captionConfig.preset.replace('_', ' ') : 'off'}</strong></span>
+          <span>Captions: <strong className="text-white">{options.burnCaptions ? options.captionConfig.preset.replace(/_/g, ' ') : 'off'}</strong></span>
           <span className="text-slate-500">·</span>
           <span>Clips: <strong className="text-white">{selectedIds.size}</strong> selected</span>
         </div>
@@ -624,9 +671,55 @@ export const ExportWorkbench: React.FC = () => {
                   />
                 </label>
                 <div className="grid grid-cols-2 gap-3">
-                  <label className="text-[10px] font-mono uppercase text-slate-500">Framing mode<select value={options.framingConfig.framingMode} onChange={(event) => setFraming('framingMode', event.target.value)} className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-slate-200"><option value="gaming">Gaming</option><option value="podcast">Podcast</option><option value="talking_head">Talking head</option><option value="screen_presenter">Screen + presenter</option><option value="reaction">Reaction</option></select></label>
-                  <label className="text-[10px] font-mono uppercase text-slate-500">Canvas ratio<select value={options.framingConfig.aspectRatio} onChange={(event) => setFraming('aspectRatio', event.target.value)} className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-slate-200"><option value="9:16">9:16 vertical</option><option value="1:1">1:1 square</option><option value="16:9">16:9 landscape</option></select></label>
-                  <label className="col-span-2 text-[10px] font-mono uppercase text-slate-500">Layout<select value={options.framingConfig.layoutTemplate} onChange={(event) => setFraming('layoutTemplate', event.target.value)} className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-slate-200"><option value="blurred_fill">Blurred fill</option><option value="split_vertical">Vertical split</option><option value="fullscreen_crop">Full crop</option><option value="pip">Picture in picture</option></select></label>
+                  <label className="text-[10px] font-mono uppercase text-slate-500">
+                    Framing mode
+                    <select
+                      value={options.framingConfig.framingMode}
+                      onChange={(event) => setFraming('framingMode', event.target.value)}
+                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-slate-200"
+                    >
+                      <option value="gaming">Gaming</option>
+                      <option value="podcast">Podcast</option>
+                      <option value="talking_head">Talking head</option>
+                      <option value="screen_presenter">Screen + presenter</option>
+                      <option value="reaction">Reaction</option>
+                    </select>
+                  </label>
+                  <label className="text-[10px] font-mono uppercase text-slate-500">
+                    Canvas ratio
+                    <select
+                      value={options.framingConfig.aspectRatio}
+                      onChange={(event) => setFraming('aspectRatio', event.target.value)}
+                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-slate-200"
+                    >
+                      <option value="9:16">9:16 vertical</option>
+                      <option value="1:1">1:1 square</option>
+                      <option value="16:9">16:9 landscape</option>
+                    </select>
+                  </label>
+                  <label className="col-span-2 text-[10px] font-mono uppercase text-slate-500">
+                    Layout
+                    <select
+                      value={options.framingConfig.layoutTemplate}
+                      onChange={(event) => setFraming('layoutTemplate', event.target.value)}
+                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-slate-200"
+                    >
+                      {(MODE_LAYOUT_OPTIONS[options.framingConfig.framingMode] || []).map((t) => (
+                        <option key={t.id} value={t.id}>{t.label}</option>
+                      ))}
+                    </select>
+                  </label>
+                  <label className="col-span-2 text-[10px] font-mono uppercase text-slate-500">
+                    Pane Fit Mode
+                    <select
+                      value={options.framingConfig.paneFitMode || 'fill'}
+                      onChange={(event) => setFraming('paneFitMode', event.target.value)}
+                      className="mt-1 w-full rounded-md border border-slate-700 bg-slate-900 px-2 py-2 text-xs text-slate-200"
+                    >
+                      <option value="fill">Fill (Edge-to-edge, zero black bars)</option>
+                      <option value="fit">Fit (Letterbox/pillarbox padding)</option>
+                    </select>
+                  </label>
                 </div>
                 <div className="space-y-2 border-t border-slate-800 pt-3">
                   <div className="text-[10px] font-mono uppercase tracking-wider text-slate-500">Optional files next to each MP4</div>

@@ -216,9 +216,19 @@ export const api = {
     return `${BASE_URL}/api/projects/${projectId}/frame?t=${timeSec}`;
   },
 
-  async autoDetectRegions(projectId: string, timeSec: number = 5.0): Promise<AutoDetectResult> {
+  async autoDetectRegions(
+    projectId: string,
+    timeSec: number = 5.0,
+    framingMode: string = 'gaming',
+    tightness: string = 'medium',
+  ): Promise<AutoDetectResult> {
+    const params = new URLSearchParams({
+      t: String(timeSec),
+      framing_mode: framingMode,
+      tightness,
+    });
     const res = await fetch(
-      `${BASE_URL}/api/projects/${projectId}/auto-detect-regions?t=${timeSec}`,
+      `${BASE_URL}/api/projects/${projectId}/auto-detect-regions?${params.toString()}`,
       { method: 'POST' }
     );
     return handleResponse<AutoDetectResult>(res);

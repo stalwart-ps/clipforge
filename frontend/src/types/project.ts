@@ -172,7 +172,17 @@ export interface RegionBox {
 
 export type FramingMode = 'gaming' | 'podcast' | 'talking_head' | 'screen_presenter' | 'reaction';
 export type AspectRatio = '9:16' | '1:1' | '16:9';
-export type LayoutTemplate = 'split_vertical' | 'fullscreen_crop' | 'blurred_fill' | 'pip';
+export type LayoutTemplate =
+  | 'split_vertical'
+  | 'split_inverted'
+  | 'fullscreen_crop'
+  | 'blurred_fill'
+  | 'pip'
+  | 'side_by_side_blur'
+  | 'wide_plus_dual'
+  | 'podcast_active_speaker'
+  | 'punch_in_zoom';
+export type PaneFitMode = 'fill' | 'fit';
 
 export interface WatermarkConfig {
   path: string | null;
@@ -185,6 +195,7 @@ export interface FramingConfig {
   framingMode: FramingMode;
   aspectRatio: AspectRatio;
   layoutTemplate: LayoutTemplate;
+  paneFitMode?: PaneFitMode;
   facecamBox: RegionBox | null;
   gameplayBox: RegionBox | null;
   splitRatio: number; // 10–90 (top pane %)
@@ -199,6 +210,7 @@ export interface SavedProfile {
   framingMode: FramingMode;
   aspectRatio: AspectRatio;
   layoutTemplate: LayoutTemplate;
+  paneFitMode?: PaneFitMode;
   facecamBox: RegionBox | null;
   gameplayBox: RegionBox | null;
   splitRatio: number;

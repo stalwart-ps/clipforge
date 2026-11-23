@@ -31,13 +31,25 @@ class WatermarkConfig(APISchema):
 # ---------------------------------------------------------------------------
 FramingMode = Literal["gaming", "podcast", "talking_head", "screen_presenter", "reaction"]
 AspectRatio = Literal["9:16", "1:1", "16:9"]
-LayoutTemplate = Literal["split_vertical", "fullscreen_crop", "blurred_fill", "pip"]
+LayoutTemplate = Literal[
+    "split_vertical",
+    "split_inverted",
+    "fullscreen_crop",
+    "blurred_fill",
+    "pip",
+    "side_by_side_blur",
+    "wide_plus_dual",
+    "podcast_active_speaker",
+    "punch_in_zoom",
+]
+PaneFitMode = Literal["fill", "fit"]
 
 
 class FramingConfig(APISchema):
     framing_mode: FramingMode = "gaming"
     aspect_ratio: AspectRatio = "9:16"
     layout_template: LayoutTemplate = "split_vertical"
+    pane_fit_mode: PaneFitMode = "fill"
 
     # Crop boxes (normalized 0–1)
     facecam_box: RegionBox | None = None
@@ -63,6 +75,7 @@ class ProfileCreate(APISchema):
     framing_mode: FramingMode = "gaming"
     aspect_ratio: AspectRatio = "9:16"
     layout_template: LayoutTemplate = "split_vertical"
+    pane_fit_mode: PaneFitMode = "fill"
     facecam_box: RegionBox | None = None
     gameplay_box: RegionBox | None = None
     split_ratio: int = Field(35, ge=10, le=90)
@@ -77,6 +90,7 @@ class ProfileUpdate(APISchema):
     framing_mode: FramingMode | None = None
     aspect_ratio: AspectRatio | None = None
     layout_template: LayoutTemplate | None = None
+    pane_fit_mode: PaneFitMode | None = None
     facecam_box: RegionBox | None = None
     gameplay_box: RegionBox | None = None
     split_ratio: int | None = None
@@ -92,6 +106,7 @@ class ProfileRead(APISchema):
     framing_mode: str
     aspect_ratio: str
     layout_template: str
+    pane_fit_mode: str = "fill"
     facecam_box: RegionBox | None = None
     gameplay_box: RegionBox | None = None
     split_ratio: int

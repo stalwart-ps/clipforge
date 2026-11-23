@@ -13,6 +13,8 @@ from app.framing.schemas import AutoDetectResult, RegionBox
 async def auto_detect_regions(
     video_path: str,
     time_sec: float = 5.0,
+    framing_mode: str = "gaming",
+    tightness: str = "medium",
 ) -> AutoDetectResult:
     """
     Runs the vision_worker subprocess and returns an AutoDetectResult.
@@ -28,6 +30,8 @@ async def auto_detect_regions(
         str(worker_script),
         "--video-path", video_path,
         "--time-sec", str(time_sec),
+        "--framing-mode", framing_mode,
+        "--tightness", tightness,
         "--output-json", str(output_json),
     ]
 
@@ -42,7 +46,7 @@ async def auto_detect_regions(
             gameplay_box=RegionBox(x=0.0, y=0.0, w=1.0, h=1.0),
             face_count=0,
             face_confidence=0.0,
-            mode_suggestion="gaming",
+            mode_suggestion=framing_mode if framing_mode in ("gaming", "podcast", "talking_head", "screen_presenter", "reaction") else "gaming",  # type: ignore[arg-type]
             message=f"Auto-detect unavailable: {e}. Install opencv-python and mediapipe.",
         )
 

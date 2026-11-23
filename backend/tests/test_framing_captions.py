@@ -130,6 +130,7 @@ class FramingCaptionsTests(unittest.TestCase):
             layout_template="split_vertical",
             split_ratio=33,
             aspect_ratio="9:16",
+            pane_fit_mode="fit",
         )
         fc, out_w, out_h = build_filter_complex(config, 1920, 1080)
         self.assertEqual(out_w % 2, 0)
@@ -153,6 +154,7 @@ class FramingCaptionsTests(unittest.TestCase):
                     layout_template="split_vertical",
                     split_ratio=ratio,
                     aspect_ratio="9:16",
+                    pane_fit_mode="fit",
                 )
                 fc, out_w, out_h = build_filter_complex(config, 1920, 1080)
                 self.assertEqual(out_w % 2, 0)

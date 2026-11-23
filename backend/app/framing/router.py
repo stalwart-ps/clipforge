@@ -137,6 +137,8 @@ async def get_project_frame(
 async def auto_detect_project_regions(
     project_id: str,
     t: float = Query(default=5.0, ge=0.0, description="Frame time for detection"),
+    framing_mode: str = Query(default="gaming", description="Framing mode for smart person expansion"),
+    tightness: str = Query(default="medium", description="Framing tightness: close, medium, wide"),
     session: AsyncSession = Depends(get_db_session),
 ) -> AutoDetectResult:
     """
@@ -150,7 +152,12 @@ async def auto_detect_project_regions(
     if project.duration_sec:
         t = max(0.0, min(t, project.duration_sec - 0.5))
 
-    result = await auto_detect_regions(project.video_path, time_sec=t)
+    result = await auto_detect_regions(
+        project.video_path,
+        time_sec=t,
+        framing_mode=framing_mode,
+        tightness=tightness,
+    )
     return result
 
 
