@@ -77,6 +77,7 @@ export const StudioWorkbench: React.FC = () => {
   const [maxClips, setMaxClips] = useState(5);
   const [clipCountMode, setClipCountMode] = useState<'auto' | 'manual'>('manual');
   const [customPrompt, setCustomPrompt] = useState('');
+  const [allowMultiSegment, setAllowMultiSegment] = useState(false);
   const [isDiscovering, setIsDiscovering] = useState(false);
 
   // Live WebSocket state
@@ -218,6 +219,7 @@ export const StudioWorkbench: React.FC = () => {
         clipCountMode,
         ...(clipCountMode === 'manual' ? { maxClips } : {}),
         customPrompt: customPrompt.trim() || undefined,
+        allowMultiSegment,
       });
       setActiveProject(updated);
       setActiveProjectId(updated.id);
@@ -901,6 +903,23 @@ export const StudioWorkbench: React.FC = () => {
                   />
                 </div>
 
+                <div className="flex items-center justify-between p-3.5 rounded-xl bg-violet-950/30 border border-violet-800/60">
+                  <div className="space-y-1">
+                    <label className="text-xs font-semibold text-slate-100 flex items-center gap-2 cursor-pointer">
+                      <input
+                        type="checkbox"
+                        checked={allowMultiSegment}
+                        onChange={(e) => setAllowMultiSegment(e.target.checked)}
+                        className="accent-violet-500 rounded w-4 h-4 cursor-pointer"
+                      />
+                      <span className="text-violet-300 font-mono font-bold">LLM Smart Stitching & Multi-Segment Discovery</span>
+                    </label>
+                    <p className="text-[11px] font-mono text-slate-400 pl-6 leading-relaxed">
+                      Automatically combines 2–4 related short moments (e.g. 15s + 15s = 30–60s viral clip) into cohesive story compilations with dead filler removed.
+                    </p>
+                  </div>
+                </div>
+
                 <div className="flex justify-end pt-1">
                   <button
                     onClick={handleRunOllamaDiscovery}
@@ -937,6 +956,11 @@ export const StudioWorkbench: React.FC = () => {
                             <span className="text-xs font-mono bg-violet-950 text-violet-300 border border-violet-800 px-2 py-0.5 rounded-full capitalize">
                               {clip.detectedMood}
                             </span>
+                            {clip.segments && clip.segments.length >= 2 && (
+                              <span className="text-[10px] font-mono bg-cyan-950 text-cyan-300 border border-cyan-800 px-1.5 py-0.5 rounded font-bold">
+                                Multi-Cut ({clip.segments.length} parts)
+                              </span>
+                            )}
                             {clip.snappedToScene && (
                               <span className="text-[10px] font-mono bg-emerald-950 text-emerald-400 border border-emerald-800 px-1.5 py-0.5 rounded">
                                 Cut-Snapped
@@ -957,11 +981,19 @@ export const StudioWorkbench: React.FC = () => {
                         </div>
 
                         <div className="p-2 rounded bg-surface border border-border-subtle text-[11px] font-mono text-slate-400 space-y-1">
-                          <div className="flex justify-between text-cyan-300">
-                            <span>
-                              [{formatDuration(clip.startSec)} - {formatDuration(clip.endSec)}]
-                            </span>
-                            <span>{clip.durationSec}s duration</span>
+                          <div className="flex flex-wrap items-center justify-between gap-1 text-cyan-300">
+                            {clip.segments && clip.segments.length >= 2 ? (
+                              <span className="font-semibold text-cyan-200">
+                                {clip.segments
+                                  .map((s) => `${formatDuration(s.startSec)}–${formatDuration(s.endSec)}`)
+                                  .join(' + ')}
+                              </span>
+                            ) : (
+                              <span>
+                                [{formatDuration(clip.startSec)} - {formatDuration(clip.endSec)}]
+                              </span>
+                            )}
+                            <span className="text-slate-300 font-bold">{clip.durationSec}s duration</span>
                           </div>
                           <div className="text-slate-400 line-clamp-2">{clip.reason}</div>
                         </div>

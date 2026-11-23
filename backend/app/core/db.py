@@ -62,5 +62,11 @@ async def init_db() -> None:
             for col_name, col_type in new_columns.items():
                 if col_name not in existing_cols:
                     await conn.execute(text(f"ALTER TABLE projects ADD COLUMN {col_name} {col_type}"))
+
+            # Migration: Ensure export_config_json exists on workspace_config table
+            res_ws = await conn.execute(text("PRAGMA table_info(workspace_config)"))
+            ws_cols = {row[1] for row in res_ws.fetchall()}
+            if "export_config_json" not in ws_cols:
+                await conn.execute(text("ALTER TABLE workspace_config ADD COLUMN export_config_json TEXT DEFAULT '{}'"))
         except Exception as e:
             print(f"DB Migration Note: {e}")

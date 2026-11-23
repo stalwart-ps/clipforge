@@ -192,6 +192,15 @@ export const api = {
     return handleResponse<CandidateClip[]>(res);
   },
 
+  async updateClips(projectId: string, clips: CandidateClip[]): Promise<CandidateClip[]> {
+    const res = await fetch(`${BASE_URL}/api/projects/${projectId}/clips`, {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ clips }),
+    });
+    return handleResponse<CandidateClip[]>(res);
+  },
+
   getVideoStreamUrl(projectId: string): string {
     return `${BASE_URL}/api/projects/${projectId}/stream`;
   },
@@ -296,20 +305,20 @@ export const api = {
     return `${BASE_URL}/api/projects/${projectId}/exports/jobs/${jobId}/files/${encodeURIComponent(fileName)}`;
   },
 
-  async getWorkspaceConfig(projectId: string): Promise<{ layoutConfig: Record<string, unknown>; captionConfig: Record<string, unknown>; updatedAt?: string }> {
+  async getWorkspaceConfig(projectId: string): Promise<{ layoutConfig: Record<string, unknown>; captionConfig: Record<string, unknown>; exportConfig?: Record<string, unknown>; updatedAt?: string }> {
     const res = await fetch(`${BASE_URL}/api/projects/${projectId}/workspace`);
-    return handleResponse<{ layoutConfig: Record<string, unknown>; captionConfig: Record<string, unknown>; updatedAt?: string }>(res);
+    return handleResponse<{ layoutConfig: Record<string, unknown>; captionConfig: Record<string, unknown>; exportConfig?: Record<string, unknown>; updatedAt?: string }>(res);
   },
 
   async patchWorkspaceConfig(
     projectId: string,
-    payload: { layoutConfig?: Record<string, unknown>; captionConfig?: Record<string, unknown> }
-  ): Promise<{ layoutConfig: Record<string, unknown>; captionConfig: Record<string, unknown>; updatedAt?: string }> {
+    payload: { layoutConfig?: Record<string, unknown>; captionConfig?: Record<string, unknown>; exportConfig?: Record<string, unknown> }
+  ): Promise<{ layoutConfig: Record<string, unknown>; captionConfig: Record<string, unknown>; exportConfig?: Record<string, unknown>; updatedAt?: string }> {
     const res = await fetch(`${BASE_URL}/api/projects/${projectId}/workspace`, {
       method: 'PATCH',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload),
     });
-    return handleResponse<{ layoutConfig: Record<string, unknown>; captionConfig: Record<string, unknown>; updatedAt?: string }>(res);
+    return handleResponse<{ layoutConfig: Record<string, unknown>; captionConfig: Record<string, unknown>; exportConfig?: Record<string, unknown>; updatedAt?: string }>(res);
   },
 };

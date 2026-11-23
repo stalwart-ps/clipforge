@@ -1,4 +1,4 @@
-from pydantic import Field
+from pydantic import Field, model_validator
 from app.core.schemas import APISchema
 
 
@@ -51,6 +51,12 @@ class SceneCut(APISchema):
     end_sec: float
 
 
+class ClipSegment(APISchema):
+    start_sec: float
+    end_sec: float
+    label: str | None = None
+
+
 class CandidateClip(APISchema):
     id: str
     title: str
@@ -63,6 +69,25 @@ class CandidateClip(APISchema):
     suggested_hashtags: list[str] = []
     detected_mood: str
     snapped_to_scene: bool = False
+    segments: list[ClipSegment] = []
+
+    @model_validator(mode="after")
+    def compute_duration_and_bounds(self) -> "CandidateClip":
+        if self.segments:
+            self.duration_sec = round(sum(max(0.0, s.end_sec - s.start_sec) for s in self.segments), 2)
+            if not self.start_sec or self.start_sec > self.segments[0].start_sec:
+                self.start_sec = self.segments[0].start_sec
+            if not self.end_sec or self.end_sec < self.segments[-1].end_sec:
+                self.end_sec = self.segments[-1].end_sec
+        elif not self.duration_sec and self.end_sec > self.start_sec:
+            self.duration_sec = round(self.end_sec - self.start_sec, 2)
+        return self
+
+    @property
+    def effective_segments(self) -> list[tuple[float, float]]:
+        if self.segments:
+            return [(s.start_sec, s.end_sec) for s in self.segments]
+        return [(self.start_sec, self.end_sec)]
 
 
 class TranscribeRequest(APISchema):
@@ -81,6 +106,11 @@ class DiscoverClipsRequest(APISchema):
     clip_count_mode: str = Field(default="manual", pattern="^(auto|manual)$")
     max_clips: int = Field(default=5, ge=1, le=100)
     custom_prompt: str | None = None
+    allow_multi_segment: bool = False
+
+
+class UpdateClipsRequest(APISchema):
+    clips: list[CandidateClip] = []
 
 
 class UpdateTranscriptRequest(APISchema):

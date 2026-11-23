@@ -1,5 +1,5 @@
 import React, { memo, useCallback, useEffect, useMemo, useRef, useState } from 'react';
-import { Activity, Check, ChevronDown, Clapperboard, Download, Film, Loader2, Play, Scissors, Square, X } from 'lucide-react';
+import { Activity, ArrowDown, ArrowUp, Check, ChevronDown, Clapperboard, Download, Film, Layers, Loader2, Play, Scissors, Square, X } from 'lucide-react';
 import { api } from '../api/client';
 import { useWorkspace } from '../context/WorkspaceContext';
 import { ExportJob, ExportOptions } from '../types/exports';
@@ -169,16 +169,32 @@ WaveformTrim.displayName = 'WaveformTrim';
 const ClipRow = memo(({ clip, selected, active, bounds, onSelect, onActivate }: {
   clip: CandidateClip; selected: boolean; active: boolean; bounds: Bounds;
   onSelect: () => void; onActivate: () => void;
-}) => (
-  <div className={`group flex items-center gap-3 p-3 rounded-xl border transition-colors ${active ? 'bg-cyan-950/30 border-cyan-700/70' : 'bg-slate-900/55 border-slate-800 hover:border-slate-700'}`}>
-    <input type="checkbox" checked={selected} onChange={onSelect} aria-label={`Select ${clip.title} for export`} className="accent-cyan-400 w-4 h-4" />
-    <button onClick={onActivate} className="min-w-0 flex-1 text-left">
-      <span className="block truncate text-sm font-medium text-slate-100">{clip.title}</span>
-      <span className="mt-1 block truncate text-[11px] text-slate-500">{formatTime(bounds.startSec)} – {formatTime(bounds.endSec)} · score {clip.viralScore}</span>
-    </button>
-    <span className="rounded-md bg-slate-800 px-2 py-1 font-mono text-[10px] text-cyan-300">{Math.round(bounds.endSec - bounds.startSec)}s</span>
-  </div>
-));
+}) => {
+  const isMulti = Boolean(clip.segments && clip.segments.length >= 2);
+  const timeDisplay = isMulti
+    ? clip.segments!.map((s) => `${formatTime(s.startSec)}–${formatTime(s.endSec)}`).join(' + ')
+    : `${formatTime(bounds.startSec)} – ${formatTime(bounds.endSec)}`;
+
+  return (
+    <div className={`group flex items-center gap-3 p-3 rounded-xl border transition-colors ${active ? 'bg-cyan-950/30 border-cyan-700/70' : 'bg-slate-900/55 border-slate-800 hover:border-slate-700'}`}>
+      <input type="checkbox" checked={selected} onChange={onSelect} aria-label={`Select ${clip.title} for export`} className="accent-cyan-400 w-4 h-4 cursor-pointer" />
+      <button onClick={onActivate} className="min-w-0 flex-1 text-left">
+        <div className="flex items-center gap-2">
+          <span className="block truncate text-sm font-medium text-slate-100">{clip.title}</span>
+          {isMulti && (
+            <span className="rounded bg-cyan-950 px-1.5 py-0.5 text-[10px] font-mono font-bold text-cyan-300 border border-cyan-800 flex-shrink-0">
+              Multi-Cut ({clip.segments!.length} parts)
+            </span>
+          )}
+        </div>
+        <span className="mt-1 block truncate text-[11px] text-slate-500 font-mono">{timeDisplay} · score {clip.viralScore}</span>
+      </button>
+      <span className="rounded-md bg-slate-800 px-2 py-1 font-mono text-[10px] text-cyan-300">
+        {Math.round(isMulti ? clip.durationSec : (bounds.endSec - bounds.startSec))}s
+      </span>
+    </div>
+  );
+});
 ClipRow.displayName = 'ClipRow';
 
 export const ExportWorkbench: React.FC = () => {
@@ -195,7 +211,7 @@ export const ExportWorkbench: React.FC = () => {
   const [options, setOptions] = useState<ExportOptions>({
     normalizeLoudness: true, removeSilence: false, silenceThresholdDb: -35,
     silenceMinDurationSec: .6,
-    sidecars: { srt: true, ass: false, metadataJson: true, metadataTxt: false },
+    sidecars: { srt: false, ass: false, metadataJson: true, metadataTxt: false },
     burnCaptions: false,
     captionConfig: DEFAULT_CAPTIONS, framingConfig: DEFAULT_FRAMING,
   });
@@ -204,6 +220,9 @@ export const ExportWorkbench: React.FC = () => {
   const [isQueueing, setIsQueueing] = useState(false);
   const [error, setError] = useState('');
   const [notice, setNotice] = useState('');
+  const [isMergeModalOpen, setIsMergeModalOpen] = useState(false);
+  const [mergeOrder, setMergeOrder] = useState<string[]>([]);
+  const [mergedTitle, setMergedTitle] = useState('');
   const videoRef = useRef<HTMLVideoElement>(null);
   const previewUrlRef = useRef('');
 
@@ -246,6 +265,9 @@ export const ExportWorkbench: React.FC = () => {
               const sRatio = typeof lc.splitRatio === 'number' ? lc.splitRatio : (typeof lc.split_ratio === 'number' ? lc.split_ratio : undefined);
               const fBox = lc.facecamBox || lc.facecam_box;
               const gBox = lc.gameplayBox || lc.gameplay_box;
+              const dft = typeof lc.dynamicFacecamTracking === 'boolean'
+                ? lc.dynamicFacecamTracking
+                : (typeof lc.dynamic_facecam_tracking === 'boolean' ? lc.dynamic_facecam_tracking : undefined);
 
               next.framingConfig = {
                 ...prev.framingConfig,
@@ -255,10 +277,22 @@ export const ExportWorkbench: React.FC = () => {
                 ...(sRatio !== undefined ? { splitRatio: sRatio } : {}),
                 ...(fBox ? { facecamBox: fBox } : {}),
                 ...(gBox ? { gameplayBox: gBox } : {}),
+                ...(dft !== undefined ? { dynamicFacecamTracking: dft } : {}),
               };
             }
             if (wsConfig.captionConfig && Object.keys(wsConfig.captionConfig).length > 0) {
               next.captionConfig = { ...prev.captionConfig, ...(wsConfig.captionConfig as any) };
+            }
+            const ec = wsConfig.exportConfig || (wsConfig as any).export_config;
+            if (ec && typeof ec.burnCaptions === 'boolean') {
+              next.burnCaptions = ec.burnCaptions;
+            } else if (wsConfig.captionConfig && typeof (wsConfig.captionConfig as any).burnCaptions === 'boolean') {
+              next.burnCaptions = (wsConfig.captionConfig as any).burnCaptions;
+            } else {
+              const saved = localStorage.getItem(`clipforge_burn_captions_${projectId}`);
+              if (saved !== null) {
+                next.burnCaptions = saved === 'true';
+              }
             }
             return next;
           });
@@ -267,6 +301,23 @@ export const ExportWorkbench: React.FC = () => {
       }).catch((cause) => alive && setError(cause.message || 'Could not load project clips'));
     return () => { alive = false; };
   }, [projectId, setActiveProjectId]);
+
+  // Persist burnCaptions to workspace config and localStorage
+  const hasExportLoadedRef = useRef(false);
+  useEffect(() => {
+    if (!projectId) return;
+    if (!hasExportLoadedRef.current) {
+      hasExportLoadedRef.current = true;
+      return;
+    }
+    localStorage.setItem(`clipforge_burn_captions_${projectId}`, String(options.burnCaptions));
+    const timer = window.setTimeout(() => {
+      api.patchWorkspaceConfig(projectId, {
+        exportConfig: { burnCaptions: options.burnCaptions },
+      }).catch(console.error);
+    }, 600);
+    return () => window.clearTimeout(timer);
+  }, [projectId, options.burnCaptions]);
 
   useEffect(() => {
     if (!projectId) return;
@@ -317,6 +368,73 @@ export const ExportWorkbench: React.FC = () => {
     } finally { setIsPreviewing(false); }
   };
 
+  const openMergeModal = () => {
+    const sel = clips.filter((c) => selectedIds.has(c.id));
+    if (sel.length < 2 || sel.length > 5) return;
+    setMergeOrder(sel.map((c) => c.id));
+    const defaultTitle = `${sel[0].title} + ${sel[1].title}${sel.length > 2 ? ` (+${sel.length - 2} more)` : ''} (Combined)`;
+    setMergedTitle(defaultTitle);
+    setIsMergeModalOpen(true);
+  };
+
+  const moveMergeItem = (idx: number, direction: 'up' | 'down') => {
+    const targetIdx = direction === 'up' ? idx - 1 : idx + 1;
+    if (targetIdx < 0 || targetIdx >= mergeOrder.length) return;
+    const next = [...mergeOrder];
+    const [removed] = next.splice(idx, 1);
+    next.splice(targetIdx, 0, removed);
+    setMergeOrder(next);
+  };
+
+  const confirmMerge = async () => {
+    if (!project || mergeOrder.length < 2) return;
+    const orderedClips = mergeOrder
+      .map((id) => clips.find((c) => c.id === id))
+      .filter((c): c is CandidateClip => Boolean(c));
+
+    const combinedSegments = orderedClips.flatMap((c) => {
+      if (c.segments && c.segments.length > 0) {
+        return c.segments;
+      }
+      const b = boundsById[c.id] || { startSec: c.startSec, endSec: c.endSec };
+      return [{ startSec: b.startSec, endSec: b.endSec, label: c.title }];
+    });
+
+    const totalDur = Math.round(combinedSegments.reduce((sum, s) => sum + Math.max(0, s.endSec - s.startSec), 0) * 100) / 100;
+    const newId = `merged_${Date.now()}`;
+    const newClip: CandidateClip = {
+      id: newId,
+      title: mergedTitle.trim() || `Merged Compilation (${orderedClips.length} parts)`,
+      hookSummary: `Multi-cut compilation stitched from ${orderedClips.length} moments.`,
+      startSec: combinedSegments[0]?.startSec || 0,
+      endSec: combinedSegments[combinedSegments.length - 1]?.endSec || 0,
+      durationSec: totalDur,
+      viralScore: Math.round(orderedClips.reduce((max, c) => Math.max(max, c.viralScore), 75)),
+      reason: `Manually combined from: ${orderedClips.map((c) => c.title).join(', ')}`,
+      suggestedHashtags: Array.from(new Set(orderedClips.flatMap((c) => c.suggestedHashtags))).slice(0, 5),
+      detectedMood: orderedClips[0]?.detectedMood || 'hype',
+      snappedToScene: false,
+      segments: combinedSegments,
+    };
+
+    const nextClips = [newClip, ...clips];
+    setClips(nextClips);
+    setActiveClipId(newClip.id);
+    setSelectedIds(new Set([newClip.id]));
+    setBoundsById((prev) => ({
+      ...prev,
+      [newClip.id]: { startSec: newClip.startSec, endSec: newClip.endSec },
+    }));
+    setIsMergeModalOpen(false);
+
+    try {
+      await api.updateClips(project.id, nextClips);
+      setNotice(`Merged ${orderedClips.length} clips into "${newClip.title}".`);
+    } catch (err: any) {
+      setError(`Failed to save merged clip: ${err.message}`);
+    }
+  };
+
   const startBatch = async () => {
     if (!project) return;
     const selected = clips.filter((clip) => selectedIds.has(clip.id));
@@ -324,6 +442,7 @@ export const ExportWorkbench: React.FC = () => {
     const exportClips = selected.map((clip) => ({
       clipId: clip.id, title: clip.title, hookSummary: clip.hookSummary,
       suggestedHashtags: clip.suggestedHashtags,
+      segments: clip.segments || [],
       ...(boundsById[clip.id] || { startSec: clip.startSec, endSec: clip.endSec }),
     }));
     setIsQueueing(true); setError(''); setNotice('');
@@ -440,6 +559,16 @@ export const ExportWorkbench: React.FC = () => {
                     >
                       Clear
                     </button>
+                    {selectedIds.size >= 2 && selectedIds.size <= 5 && (
+                      <button
+                        type="button"
+                        onClick={openMergeModal}
+                        className="px-2.5 py-1 rounded text-[10px] font-mono font-bold bg-cyan-600 hover:bg-cyan-500 text-white flex items-center gap-1 transition-all shadow-sm shadow-cyan-950"
+                      >
+                        <Layers className="h-3 w-3" />
+                        Combine 2–5 Clips
+                      </button>
+                    )}
                   </div>
                 </div>
                 <input
@@ -527,6 +656,108 @@ export const ExportWorkbench: React.FC = () => {
             </div>
           </section>
         </>
+      )}
+
+      {isMergeModalOpen && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4 backdrop-blur-sm">
+          <div className="w-full max-w-lg rounded-2xl border border-cyan-800 bg-slate-900 p-6 shadow-2xl space-y-4">
+            <div className="flex items-center justify-between border-b border-slate-800 pb-3">
+              <div className="flex items-center gap-2">
+                <Layers className="h-5 w-5 text-cyan-400" />
+                <h3 className="text-base font-semibold text-white">Combine 2–5 Clips</h3>
+              </div>
+              <button
+                onClick={() => setIsMergeModalOpen(false)}
+                className="text-slate-400 hover:text-white p-1 rounded hover:bg-slate-800"
+              >
+                <X className="h-4 w-4" />
+              </button>
+            </div>
+
+            <p className="text-xs text-slate-400">
+              Arrange 2–5 selected moments in playback order. The combined clip will stitch all segments with seamless PTS and audio fade.
+            </p>
+
+            <div>
+              <label className="block text-[11px] font-mono uppercase text-slate-400 mb-1">Compilation Title</label>
+              <input
+                type="text"
+                value={mergedTitle}
+                onChange={(e) => setMergedTitle(e.target.value)}
+                className="w-full rounded-lg border border-slate-700 bg-slate-950 px-3 py-2 text-xs text-slate-100 font-medium"
+              />
+            </div>
+
+            <div className="space-y-2 max-h-56 overflow-y-auto pr-1">
+              {mergeOrder.map((id, idx) => {
+                const c = clips.find((item) => item.id === id);
+                if (!c) return null;
+                const b = boundsById[c.id] || { startSec: c.startSec, endSec: c.endSec };
+                return (
+                  <div
+                    key={id}
+                    className="flex items-center justify-between gap-3 p-2.5 rounded-lg border border-slate-800 bg-slate-950/70"
+                  >
+                    <div className="flex items-center gap-2.5 min-w-0 flex-1">
+                      <span className="w-5 h-5 rounded bg-cyan-950 text-cyan-300 border border-cyan-800 text-[10px] font-mono font-bold flex items-center justify-center flex-shrink-0">
+                        {idx + 1}
+                      </span>
+                      <div className="min-w-0">
+                        <span className="block truncate text-xs font-medium text-slate-200">{c.title}</span>
+                        <span className="block text-[10px] text-slate-500 font-mono">
+                          {formatTime(b.startSec)}–{formatTime(b.endSec)} ({Math.round(b.endSec - b.startSec)}s)
+                        </span>
+                      </div>
+                    </div>
+
+                    <div className="flex items-center gap-1">
+                      <button
+                        type="button"
+                        disabled={idx === 0}
+                        onClick={() => moveMergeItem(idx, 'up')}
+                        className="p-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-30 text-slate-300"
+                        title="Move Up"
+                      >
+                        <ArrowUp className="h-3.5 w-3.5" />
+                      </button>
+                      <button
+                        type="button"
+                        disabled={idx === mergeOrder.length - 1}
+                        onClick={() => moveMergeItem(idx, 'down')}
+                        className="p-1 rounded bg-slate-800 hover:bg-slate-700 disabled:opacity-30 text-slate-300"
+                        title="Move Down"
+                      >
+                        <ArrowDown className="h-3.5 w-3.5" />
+                      </button>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+
+            <div className="flex items-center justify-between border-t border-slate-800 pt-3">
+              <span className="text-xs font-mono text-cyan-300">
+                {mergeOrder.length} parts selected
+              </span>
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => setIsMergeModalOpen(false)}
+                  className="rounded-lg border border-slate-700 px-3 py-1.5 text-xs text-slate-300 hover:bg-slate-800"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="button"
+                  onClick={confirmMerge}
+                  className="rounded-lg bg-cyan-500 hover:bg-cyan-400 px-4 py-1.5 text-xs font-bold text-slate-950"
+                >
+                  Combine into 1 Clip
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
       )}
     </div>
   );

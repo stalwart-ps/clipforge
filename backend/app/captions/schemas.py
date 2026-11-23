@@ -21,7 +21,8 @@ class CaptionConfig(APISchema):
     outline_color: str | None = Field(None, pattern=r"^#[0-9A-Fa-f]{6}$")
     outline_width: float | None = Field(None, ge=0.0, le=16.0)
     shadow_depth: float | None = Field(None, ge=0.0, le=12.0)
-    margin_v: int | None = Field(None, ge=0, le=1000)
+    margin_v: int | None = Field(None, ge=0, le=2000)
+    position_y_percent: float | None = Field(None, ge=0.0, le=100.0)
     max_words_per_line: int | None = Field(None, ge=1, le=6)
     all_caps: bool | None = None
     animation: CaptionAnimation | None = None

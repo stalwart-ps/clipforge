@@ -13,12 +13,20 @@ import {
 } from '../types/project';
 
 const PRESETS: Record<CaptionPreset, CaptionConfig> = {
-  hormozi_pop: { preset: 'hormozi_pop', fontName: 'Arial Black', fontSize: 78, primaryColor: '#FFFFFF', highlightColor: '#FFE600', outlineColor: '#000000', outlineWidth: 6, shadowDepth: 3, marginV: 180, maxWordsPerLine: 3, allCaps: true, animation: 'pop', profanityMask: false },
-  karaoke_highlight: { preset: 'karaoke_highlight', fontName: 'Arial', fontSize: 62, primaryColor: '#FFFFFF', highlightColor: '#52F59B', outlineColor: '#111111', outlineWidth: 3, shadowDepth: 1, marginV: 140, maxWordsPerLine: 5, allCaps: false, animation: 'highlight', profanityMask: false },
-  minimal_clean: { preset: 'minimal_clean', fontName: 'Arial', fontSize: 54, primaryColor: '#FFFFFF', highlightColor: '#FFFFFF', outlineColor: '#111111', outlineWidth: 1, shadowDepth: 2, marginV: 110, maxWordsPerLine: 6, allCaps: false, animation: 'none', profanityMask: false },
-  gaming_neon: { preset: 'gaming_neon', fontName: 'Arial Black', fontSize: 66, primaryColor: '#E7FCFF', highlightColor: '#00F5FF', outlineColor: '#E000FF', outlineWidth: 5, shadowDepth: 4, marginV: 300, maxWordsPerLine: 4, allCaps: true, animation: 'bounce', profanityMask: false },
-  boxed_pill: { preset: 'boxed_pill', fontName: 'Arial', fontSize: 58, primaryColor: '#FFFFFF', highlightColor: '#FFE875', outlineColor: '#171717', outlineWidth: 2, shadowDepth: 1, marginV: 130, maxWordsPerLine: 4, allCaps: false, animation: 'highlight', profanityMask: false },
+  hormozi_pop: { preset: 'hormozi_pop', fontName: 'Arial Black', fontSize: 78, primaryColor: '#FFFFFF', highlightColor: '#FFE600', outlineColor: '#000000', outlineWidth: 6, shadowDepth: 3, marginV: 180, positionYPercent: 80, maxWordsPerLine: 3, allCaps: true, animation: 'pop', profanityMask: false },
+  karaoke_highlight: { preset: 'karaoke_highlight', fontName: 'Arial', fontSize: 62, primaryColor: '#FFFFFF', highlightColor: '#52F59B', outlineColor: '#111111', outlineWidth: 3, shadowDepth: 1, marginV: 140, positionYPercent: 80, maxWordsPerLine: 5, allCaps: false, animation: 'highlight', profanityMask: false },
+  minimal_clean: { preset: 'minimal_clean', fontName: 'Arial', fontSize: 54, primaryColor: '#FFFFFF', highlightColor: '#FFFFFF', outlineColor: '#111111', outlineWidth: 1, shadowDepth: 2, marginV: 110, positionYPercent: 82, maxWordsPerLine: 6, allCaps: false, animation: 'none', profanityMask: false },
+  gaming_neon: { preset: 'gaming_neon', fontName: 'Arial Black', fontSize: 66, primaryColor: '#E7FCFF', highlightColor: '#00F5FF', outlineColor: '#E000FF', outlineWidth: 5, shadowDepth: 4, marginV: 300, positionYPercent: 75, maxWordsPerLine: 4, allCaps: true, animation: 'bounce', profanityMask: false },
+  boxed_pill: { preset: 'boxed_pill', fontName: 'Arial', fontSize: 58, primaryColor: '#FFFFFF', highlightColor: '#FFE875', outlineColor: '#171717', outlineWidth: 2, shadowDepth: 1, marginV: 130, positionYPercent: 80, maxWordsPerLine: 4, allCaps: false, animation: 'highlight', profanityMask: false },
 };
+
+const POSITION_PRESETS = [
+  { label: 'Top', val: 12 },
+  { label: 'Upper-Mid', val: 28 },
+  { label: 'Split Seam (Center)', val: 50 },
+  { label: 'Lower-Third (Default)', val: 80 },
+  { label: 'Bottom', val: 90 },
+] as const;
 
 const PRESET_LABELS: Record<CaptionPreset, string> = {
   hormozi_pop: 'Hormozi Pop', karaoke_highlight: 'Karaoke Highlight', minimal_clean: 'Minimal Clean',
@@ -74,6 +82,25 @@ const CaptionPreview = memo(function CaptionPreview({ videoRef, projectId, time,
         context.textAlign = 'center';
         context.fillText('Select a transcribed video to preview captions', width / 2, height / 2);
       }
+
+      // Visual split seam guides so user can place captions cleanly
+      context.save();
+      context.setLineDash([5, 5]);
+      context.strokeStyle = 'rgba(255, 255, 255, 0.15)';
+      context.lineWidth = 1;
+      context.beginPath();
+      context.moveTo(0, height * 0.35);
+      context.lineTo(width, height * 0.35);
+      context.moveTo(0, height * 0.50);
+      context.lineTo(width, height * 0.50);
+      context.stroke();
+      context.fillStyle = 'rgba(255, 255, 255, 0.35)';
+      context.font = '10px monospace';
+      context.textAlign = 'right';
+      context.fillText('Split 35%', width - 8, height * 0.35 - 4);
+      context.fillText('Center 50%', width - 8, height * 0.50 - 4);
+      context.restore();
+
       let active = -1;
       for (let i = 0; i < words.length; i += 1) {
         if (videoTime >= words[i].start && videoTime <= words[i].end) { active = i; break; }
@@ -89,8 +116,13 @@ const CaptionPreview = memo(function CaptionPreview({ videoRef, projectId, time,
         if (config.animation === 'pop' || config.animation === 'bounce') {
           scaleFactor = 1 + 0.14 * Math.max(0, 1 - elapsed / 0.2);
         }
+
+        const posY = typeof config.positionYPercent === 'number'
+          ? config.positionYPercent
+          : Math.max(5, Math.min(95, 100 - (config.marginV / 1920) * 100));
+
         context.save();
-        context.translate(width / 2, height - (config.marginV / 1920) * height);
+        context.translate(width / 2, (posY / 100) * height);
         context.scale(scaleFactor, scaleFactor);
         context.font = `${['hormozi_pop', 'gaming_neon'].includes(config.preset) ? '900' : '700'} ${fontSize}px "${config.fontName}", sans-serif`;
         context.textAlign = 'left';
@@ -333,7 +365,28 @@ export const CaptionStudio: React.FC = () => {
     } finally { setRendering(false); }
   };
 
-  const setPreset = (preset: CaptionPreset) => setConfig({ ...PRESETS[preset], profanityMask: config.profanityMask });
+  const currentPosY = typeof config.positionYPercent === 'number'
+    ? config.positionYPercent
+    : Math.max(5, Math.min(95, Math.round(100 - (config.marginV / 1920) * 100)));
+
+  const handlePositionChange = (val: number) => {
+    const clampedVal = Math.max(5, Math.min(95, val));
+    const marginV = clampedVal < 35
+      ? Math.max(10, Math.round((clampedVal / 100) * 1920))
+      : Math.max(10, Math.round(((100 - clampedVal) / 100) * 1920));
+
+    setConfig((current) => ({
+      ...current,
+      positionYPercent: clampedVal,
+      marginV,
+    }));
+  };
+
+  const setPreset = (preset: CaptionPreset) => setConfig({
+    ...PRESETS[preset],
+    positionYPercent: PRESETS[preset].positionYPercent ?? 80,
+    profanityMask: config.profanityMask,
+  });
   const patchSlider = <K extends 'fontSize' | 'outlineWidth' | 'shadowDepth' | 'marginV' | 'maxWordsPerLine',>(key: K, min: number, max: number) =>
     (event: React.ChangeEvent<HTMLInputElement>) => updateConfig(key, Math.max(min, Math.min(max, Number(event.target.value))) as CaptionConfig[K]);
 
@@ -413,9 +466,61 @@ export const CaptionStudio: React.FC = () => {
             <label className="text-xs text-slate-400">Shadow depth <span className="text-cyan-300">{config.shadowDepth}</span>
               <input type="range" min={0} max={10} step={0.5} value={config.shadowDepth} onChange={patchSlider('shadowDepth', 0, 10)} className="mt-3 block w-full accent-cyan-500" />
             </label>
-            <label className="text-xs text-slate-400">Vertical position · MarginV <span className="text-cyan-300">{config.marginV}</span>
-              <input type="range" min={30} max={600} step={5} value={config.marginV} onChange={patchSlider('marginV', 30, 600)} className="mt-3 block w-full accent-cyan-500" />
-            </label>
+            {/* Dedicated Caption Position Control */}
+            <div className="col-span-2 space-y-2.5 rounded-xl bg-slate-950/70 p-3.5 border border-slate-800">
+              <div className="flex items-center justify-between">
+                <div>
+                  <span className="text-xs font-mono font-semibold text-slate-200 block">Caption Position</span>
+                  <span className="text-[10px] font-mono text-slate-500">
+                    {currentPosY < 35 ? 'Top Anchor (Alignment 8)' : 'Bottom Anchor (Alignment 2)'} · MarginV: {config.marginV}px
+                  </span>
+                </div>
+                <span className="text-xs font-mono font-bold text-cyan-400 bg-cyan-950/80 px-2 py-0.5 rounded border border-cyan-800">
+                  {currentPosY}% from top
+                </span>
+              </div>
+
+              {/* Quick Preset Buttons: Top, Upper-Mid, Split Seam (Center), Lower-Third (Default), Bottom */}
+              <div className="grid grid-cols-5 gap-1.5">
+                {POSITION_PRESETS.map((p) => {
+                  const isSelected = Math.abs(currentPosY - p.val) <= 2;
+                  return (
+                    <button
+                      key={p.label}
+                      type="button"
+                      onClick={() => handlePositionChange(p.val)}
+                      className={`px-1 py-1.5 rounded-lg border text-[10px] font-mono text-center transition-all ${
+                        isSelected
+                          ? 'border-cyan-500 text-cyan-300 bg-cyan-950/90 font-bold shadow-sm'
+                          : 'border-slate-800 text-slate-400 hover:border-slate-700 bg-slate-900/60'
+                      }`}
+                    >
+                      {p.label}
+                    </button>
+                  );
+                })}
+              </div>
+
+              {/* Fine-Grained Vertical Position Slider */}
+              <div className="pt-1">
+                <input
+                  type="range"
+                  min={5}
+                  max={95}
+                  step={1}
+                  value={currentPosY}
+                  onChange={(e) => handlePositionChange(Number(e.target.value))}
+                  className="w-full accent-cyan-500 cursor-pointer"
+                />
+                <div className="flex justify-between text-[10px] font-mono text-slate-500 pt-1">
+                  <span>5% (Top)</span>
+                  <span>28% (Upper-Mid)</span>
+                  <span>50% (Split Seam)</span>
+                  <span>80% (Lower-Third)</span>
+                  <span>95% (Bottom)</span>
+                </div>
+              </div>
+            </div>
             <label className="text-xs text-slate-400">Words per line · {config.maxWordsPerLine}
               <input type="range" min={1} max={6} value={config.maxWordsPerLine} onChange={patchSlider('maxWordsPerLine', 1, 6)} className="mt-3 block w-full accent-cyan-500" />
             </label>

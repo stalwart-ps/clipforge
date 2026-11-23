@@ -701,6 +701,7 @@ class ProjectService:
                 max_duration=payload.max_duration_sec,
                 max_clips=target_max_clips,
                 custom_instructions=payload.custom_prompt or "",
+                allow_multi_segment=payload.allow_multi_segment,
             )
         )
 
@@ -715,6 +716,7 @@ class ProjectService:
         max_duration: int,
         max_clips: int | None,
         custom_instructions: str,
+        allow_multi_segment: bool = False,
     ):
         try:
             async with async_session_maker() as session:
@@ -766,6 +768,7 @@ class ProjectService:
                 max_duration=max_duration,
                 max_clips=max_clips,
                 custom_instructions=custom_instructions,
+                allow_multi_segment=allow_multi_segment,
             )
 
             async with async_session_maker() as session:
@@ -858,6 +861,19 @@ class ProjectService:
 
         data = json.loads(project.candidate_clips_json)
         return [CandidateClip(**c) for c in data]
+
+    @classmethod
+    async def update_clips(cls, session: AsyncSession, project_id: str, clips: list[CandidateClip]) -> list[CandidateClip]:
+        q = select(Project).where(Project.id == project_id)
+        res = await session.execute(q)
+        project = res.scalar_one_or_none()
+        if not project:
+            raise NotFoundError(f"Project {project_id} not found")
+
+        project.candidate_clips_json = json.dumps([c.model_dump() for c in clips])
+        await session.commit()
+        await session.refresh(project)
+        return clips
 
     @classmethod
     async def cancel_project(cls, session: AsyncSession, project_id: str) -> bool:

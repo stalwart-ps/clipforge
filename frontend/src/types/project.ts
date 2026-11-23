@@ -49,6 +49,7 @@ export interface CaptionConfig {
   outlineWidth: number;
   shadowDepth: number;
   marginV: number;
+  positionYPercent?: number;
   maxWordsPerLine: number;
   allCaps: boolean;
   animation: CaptionAnimation;
@@ -58,6 +59,12 @@ export interface CaptionConfig {
 export interface CaptionGenerateResponse {
   assPath: string;
   eventCount: number;
+}
+
+export interface ClipSegment {
+  startSec: number;
+  endSec: number;
+  label?: string | null;
 }
 
 export interface CandidateClip {
@@ -72,6 +79,7 @@ export interface CandidateClip {
   suggestedHashtags: string[];
   detectedMood: string;
   snappedToScene: boolean;
+  segments?: ClipSegment[];
 }
 
 export interface TranscribeRequest {
@@ -90,6 +98,7 @@ export interface DiscoverClipsRequest {
   clipCountMode?: 'auto' | 'manual';
   maxClips?: number;
   customPrompt?: string;
+  allowMultiSegment?: boolean;
 }
 
 export interface ProjectRead {
@@ -181,6 +190,7 @@ export interface FramingConfig {
   splitRatio: number; // 10–90 (top pane %)
   watermark: WatermarkConfig | null;
   faceDetected?: boolean | null;
+  dynamicFacecamTracking?: boolean;
 }
 
 export interface SavedProfile {
@@ -195,6 +205,7 @@ export interface SavedProfile {
   watermark: WatermarkConfig | null;
   ollamaPrompt: string | null;
   captionStyle: string;
+  dynamicFacecamTracking?: boolean;
   createdAt: string;
   updatedAt: string;
 }

@@ -113,3 +113,41 @@ async def track_active_speaker(video_path: str, start_sec: float, end_sec: float
         return payload.get("tracks", [])
     finally:
         output_json.unlink(missing_ok=True)
+
+
+async def track_facecam_overlay(
+    video_path: str,
+    start_sec: float,
+    end_sec: float,
+    facecam_box: dict | RegionBox,
+) -> list[dict]:
+    """Run dynamic facecam tracking in the isolated vision worker subprocess."""
+    box_dict = facecam_box.model_dump() if hasattr(facecam_box, "model_dump") else dict(facecam_box)
+    worker_script = settings.backend_dir / "workers" / "vision_worker.py"
+    output_json = settings.temp_dir / f"facecam_{abs(hash((video_path, start_sec, end_sec)))}.json"
+    cmd = [
+        sys.executable,
+        str(worker_script),
+        "--video-path",
+        video_path,
+        "--track-facecam",
+        "--track-start",
+        str(start_sec),
+        "--track-end",
+        str(end_sec),
+        "--facecam-box",
+        json.dumps(box_dict),
+        "--output-json",
+        str(output_json),
+    ]
+    try:
+        await asyncio.to_thread(_run_vision_subprocess, cmd, max(120.0, (end_sec - start_sec) * 3))
+        if output_json.exists():
+            payload = json.loads(output_json.read_text(encoding="utf-8"))
+            return payload.get("tracks", [])
+        return []
+    except Exception:
+        return []
+    finally:
+        output_json.unlink(missing_ok=True)
+

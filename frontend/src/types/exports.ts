@@ -1,4 +1,4 @@
-import { CaptionConfig, FramingConfig } from './project';
+import { CaptionConfig, ClipSegment, FramingConfig } from './project';
 
 export interface ExportClipRequest {
   clipId: string;
@@ -7,6 +7,7 @@ export interface ExportClipRequest {
   suggestedHashtags: string[];
   startSec: number;
   endSec: number;
+  segments?: ClipSegment[];
 }
 
 export interface ExportSidecars {

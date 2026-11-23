@@ -25,6 +25,7 @@ from app.exports.media import (
     parse_silencedetect,
 )
 from app.exports.schemas import BatchExportRequest, ExportClip, ExportJobRead, PreviewRequest
+from app.framing.auto_detect import track_facecam_overlay
 from app.framing.ffmpeg_builder import build_filter_complex
 from app.framing.schemas import FramingConfig, RegionBox, WatermarkConfig
 from app.projects.schemas import TranscriptData
@@ -193,6 +194,10 @@ async def _resolve_framing_config(project_id: str, config: FramingConfig) -> Fra
                     if isinstance(s_ratio, (int, float)) and config.split_ratio == 35 and int(s_ratio) != 35:
                         updates["split_ratio"] = int(s_ratio)
 
+                    dynamic_facecam = data.get("dynamicFacecamTracking") if "dynamicFacecamTracking" in data else data.get("dynamic_facecam_tracking")
+                    if dynamic_facecam is not None:
+                        updates["dynamic_facecam_tracking"] = bool(dynamic_facecam)
+
                     wm_path = data.get("watermarkPath")
                     if wm_path and not (config.watermark and config.watermark.path):
                         updates["watermark"] = WatermarkConfig(
@@ -216,6 +221,63 @@ async def _resolve_framing_config(project_id: str, config: FramingConfig) -> Fra
     return config
 
 
+async def _resolve_caption_config(project_id: str, config: CaptionConfig) -> CaptionConfig:
+    """Enrich CaptionConfig with saved workspace captionConfig if present."""
+    try:
+        from app.core.db import AsyncSessionLocal
+        from app.workspace.models import WorkspaceConfig
+        from sqlalchemy import select
+
+        async with AsyncSessionLocal() as session:
+            res = await session.execute(
+                select(WorkspaceConfig).where(WorkspaceConfig.project_id == project_id)
+            )
+            ws = res.scalar_one_or_none()
+            if ws and ws.caption_config_json:
+                data = json.loads(ws.caption_config_json)
+                if isinstance(data, dict) and data:
+                    updates = {}
+                    field_map = {
+                        "preset": ("preset", str),
+                        "fontName": ("font_name", str),
+                        "font_name": ("font_name", str),
+                        "fontSize": ("font_size", int),
+                        "font_size": ("font_size", int),
+                        "primaryColor": ("primary_color", str),
+                        "primary_color": ("primary_color", str),
+                        "highlightColor": ("highlight_color", str),
+                        "highlight_color": ("highlight_color", str),
+                        "outlineColor": ("outline_color", str),
+                        "outline_color": ("outline_color", str),
+                        "outlineWidth": ("outline_width", float),
+                        "outline_width": ("outline_width", float),
+                        "shadowDepth": ("shadow_depth", float),
+                        "shadow_depth": ("shadow_depth", float),
+                        "marginV": ("margin_v", int),
+                        "margin_v": ("margin_v", int),
+                        "positionYPercent": ("position_y_percent", float),
+                        "position_y_percent": ("position_y_percent", float),
+                        "maxWordsPerLine": ("max_words_per_line", int),
+                        "max_words_per_line": ("max_words_per_line", int),
+                        "allCaps": ("all_caps", bool),
+                        "all_caps": ("all_caps", bool),
+                        "animation": ("animation", str),
+                        "profanityMask": ("profanity_mask", bool),
+                        "profanity_mask": ("profanity_mask", bool),
+                    }
+                    for k, (attr, typ) in field_map.items():
+                        if k in data and data[k] is not None:
+                            try:
+                                updates[attr] = typ(data[k])
+                            except (ValueError, TypeError):
+                                pass
+                    if updates:
+                        config = config.model_copy(update=updates)
+    except Exception as e:
+        logger.warning("Could not check workspace caption_config for project %s: %s", project_id, e)
+    return config
+
+
 async def _run_batch(
     job_id: str,
     video_path: str,
@@ -235,6 +297,7 @@ async def _run_batch(
         await _publish(job_id)
 
         request.framing_config = await _resolve_framing_config(job.project_id, request.framing_config)
+        request.caption_config = await _resolve_caption_config(job.project_id, request.caption_config)
 
         logger.info(
             "=== EXPORT JOB START === job_id=%s project_id=%s clips=%d\n"
@@ -250,21 +313,39 @@ async def _run_batch(
         for index, clip in enumerate(clips):
             if await _cancelled(job_id):
                 break
-            start = max(0.0, clip.start_sec)
-            end = min(clip.end_sec, duration_sec) if duration_sec else clip.end_sec
-            if end <= start:
-                raise ValueError(f"Clip {clip.title!r} has invalid bounds")
+
+            # Multi-segment support: consume clip.segments or fall back to single range
+            if clip.segments and len(clip.segments) > 0:
+                base_segments = [
+                    (max(0.0, s.start_sec), min(s.end_sec, duration_sec) if duration_sec else s.end_sec)
+                    for s in clip.segments
+                    if s.end_sec > s.start_sec
+                ][:8]
+            else:
+                s_start = max(0.0, clip.start_sec)
+                s_end = min(clip.end_sec, duration_sec) if duration_sec else clip.end_sec
+                base_segments = [(s_start, s_end)] if s_end > s_start else []
+
+            if not base_segments:
+                raise ValueError(f"Clip {clip.title!r} has invalid bounds or segments")
+
+            start = base_segments[0][0]
+            end = base_segments[-1][1]
             job.current_clip = clip.title
             await _publish(job_id)
 
             if request.remove_silence:
-                silences = await _silences(
-                    job_id, video_path, start, end,
-                    request.silence_threshold_db, request.silence_min_duration_sec,
-                )
-                kept = calculate_keep_intervals(start, end, silences)
+                all_kept = []
+                for seg_start, seg_end in base_segments:
+                    silences = await _silences(
+                        job_id, video_path, seg_start, seg_end,
+                        request.silence_threshold_db, request.silence_min_duration_sec,
+                    )
+                    all_kept.extend(calculate_keep_intervals(seg_start, seg_end, silences))
+                kept = all_kept[:20] if all_kept else base_segments
             else:
-                kept = [(start, end)]
+                kept = base_segments
+
             if await _cancelled(job_id):
                 break
 
@@ -290,11 +371,48 @@ async def _run_batch(
                 ass_burn_filename = ass_file.name
                 ass_file_path = ass_file
 
-            # 3. Build filter complex with ASS subtitle filter if burning captions
-            # Note: We pass relative filename (ass_burn_filename) and execute FFmpeg with cwd=output_dir
-            # to prevent Windows drive-colon (D:) and path spaces (New folder) from breaking libass.
+            # 3. Dynamic Facecam Tracking across segments
+            facecam_tracks = None
+            if (
+                request.framing_config.dynamic_facecam_tracking
+                and request.framing_config.layout_template in ("split_vertical", "pip")
+                and request.framing_config.facecam_box
+            ):
+                try:
+                    all_tracks = []
+                    offset = 0.0
+                    for seg_start, seg_end in base_segments:
+                        seg_dur = max(0.01, seg_end - seg_start)
+                        raw_tracks = await track_facecam_overlay(
+                            video_path, seg_start, seg_end, request.framing_config.facecam_box,
+                        )
+                        for r in raw_tracks:
+                            r_time = float(r.get("time", 0.0))
+                            mapped_time = map_time_to_output(seg_start + r_time, kept)
+                            if mapped_time is not None:
+                                all_tracks.append({
+                                    "time": mapped_time,
+                                    "x": r.get("x"),
+                                    "y": r.get("y"),
+                                })
+                            else:
+                                all_tracks.append({
+                                    "time": round(offset + r_time, 3),
+                                    "x": r.get("x"),
+                                    "y": r.get("y"),
+                                })
+                        offset += seg_dur
+                    facecam_tracks = all_tracks if all_tracks else None
+                    logger.info("Dynamic facecam tracking emitted %d keyframes for clip %s", len(facecam_tracks or []), clip.title)
+                except Exception as e:
+                    logger.warning("Dynamic facecam tracking failed, falling back to static crop: %s", e)
+                    facecam_tracks = None
+
             framing, out_w, out_h = build_filter_complex(
-                request.framing_config, src_w, src_h, ass_path=ass_burn_filename,
+                request.framing_config, src_w, src_h,
+                ass_path=ass_burn_filename,
+                facecam_tracks=facecam_tracks,
+                watermark_input_index=len(base_segments),
             )
             watermark = request.framing_config.watermark
             progress_duration = sum(right - left for left, right in kept)
@@ -310,6 +428,7 @@ async def _run_batch(
                     encoder, kept, request.normalize_loudness,
                     has_audio=has_audio,
                     watermark_path=watermark.path if watermark else None,
+                    segments=base_segments,
                 )
 
                 # Export Debug Logging on every export
@@ -368,26 +487,23 @@ async def _run_batch(
                 ass_file_path.unlink(missing_ok=True)
 
             sidecars = request.sidecars
-            subtitles_dir = (output_dir / "subtitles") if request.burn_captions else output_dir
-            if request.burn_captions and (sidecars.srt or sidecars.ass):
+            if sidecars.srt or sidecars.ass:
+                subtitles_dir = output_dir / "subtitles"
                 subtitles_dir.mkdir(parents=True, exist_ok=True)
-
-            srt_file = subtitles_dir / f"{out_stem}.srt"
-            ass_file_out = subtitles_dir / f"{out_stem}.ass"
-
-            if clip_transcript and sidecars.srt:
-                srt = _make_srt(clip_transcript)
-                srt_file.write_text(srt, encoding="utf-8")
-            if clip_transcript and sidecars.ass:
-                ass, _ = generate_ass(clip_transcript, request.caption_config, out_w, out_h)
-                ass_file_out.write_text(ass, encoding="utf-8-sig")
+                if clip_transcript and sidecars.srt:
+                    srt = _make_srt(clip_transcript)
+                    (subtitles_dir / f"{out_stem}.srt").write_text(srt, encoding="utf-8")
+                if clip_transcript and sidecars.ass:
+                    ass, _ = generate_ass(clip_transcript, request.caption_config, out_w, out_h)
+                    (subtitles_dir / f"{out_stem}.ass").write_text(ass, encoding="utf-8-sig")
             metadata = {
                 "project_id": job.project_id, "clip_id": clip.clip_id,
                 "title": clip.title, "hook_summary": clip.hook_summary,
                 "suggested_hashtags": clip.suggested_hashtags,
                 "source_start_sec": start, "source_end_sec": end,
+                "segments": [{"start_sec": s[0], "end_sec": s[1]} for s in base_segments],
                 "duration_sec": sum(right - left for left, right in kept),
-                "removed_silence_sec": max(0.0, end - start - sum(right - left for left, right in kept)),
+                "removed_silence_sec": max(0.0, sum(s[1] - s[0] for s in base_segments) - sum(right - left for left, right in kept)),
                 "encoder": encoder_used, "fps_mode": "cfr",
                 "loudness_normalized": request.normalize_loudness,
                 "sidecar_timeline": "mapped to exported CFR video timeline",
@@ -492,6 +608,7 @@ async def render_preview(
     output_dir.mkdir(parents=True, exist_ok=True)
 
     request.framing_config = await _resolve_framing_config(project_id, request.framing_config)
+    request.caption_config = await _resolve_caption_config(project_id, request.caption_config)
 
     _, out_w, out_h = build_filter_complex(request.framing_config, src_w, src_h)
 
@@ -506,7 +623,24 @@ async def render_preview(
             ass_burn_filename = ass_file.name
             ass_file_path = ass_file
 
-    framing, out_w, out_h = build_filter_complex(request.framing_config, src_w, src_h, ass_path=ass_burn_filename)
+    facecam_tracks = None
+    if (
+        request.framing_config.dynamic_facecam_tracking
+        and request.framing_config.layout_template in ("split_vertical", "pip")
+        and request.framing_config.facecam_box
+    ):
+        try:
+            facecam_tracks = await track_facecam_overlay(
+                video_path, start, end, request.framing_config.facecam_box,
+            )
+            logger.info("Dynamic facecam preview tracking emitted %d keyframes", len(facecam_tracks))
+        except Exception as e:
+            logger.warning("Dynamic facecam preview tracking failed: %s", e)
+            facecam_tracks = None
+
+    framing, out_w, out_h = build_filter_complex(
+        request.framing_config, src_w, src_h, ass_path=ass_burn_filename, facecam_tracks=facecam_tracks,
+    )
     watermark = request.framing_config.watermark
     output = output_dir / f"preview_{uuid.uuid4().hex}.mp4"
     temp = output.with_name(output.stem + ".partial.mp4")

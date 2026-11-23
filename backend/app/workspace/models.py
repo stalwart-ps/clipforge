@@ -10,6 +10,7 @@ class WorkspaceConfig(Base):
     project_id: Mapped[str] = mapped_column(String(64), primary_key=True)
     layout_config_json: Mapped[str] = mapped_column(Text, default="{}")
     caption_config_json: Mapped[str] = mapped_column(Text, default="{}")
+    export_config_json: Mapped[str] = mapped_column(Text, default="{}")
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
         default=lambda: datetime.now(timezone.utc),

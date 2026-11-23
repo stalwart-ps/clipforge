@@ -51,6 +51,9 @@ class FramingConfig(APISchema):
     # `None` means let Gaming Mode use its full-frame no-face fallback.
     face_detected: bool | None = None
 
+    # Dynamic Facecam Tracking (Auto-Follow Overlay Moves)
+    dynamic_facecam_tracking: bool = False
+
 
 # ---------------------------------------------------------------------------
 # Saved Profile CRUD
@@ -66,6 +69,7 @@ class ProfileCreate(APISchema):
     watermark: WatermarkConfig | None = None
     ollama_prompt: str | None = None
     caption_style: str = "hormozi_pop"
+    dynamic_facecam_tracking: bool = False
 
 
 class ProfileUpdate(APISchema):
@@ -79,6 +83,7 @@ class ProfileUpdate(APISchema):
     watermark: WatermarkConfig | None = None
     ollama_prompt: str | None = None
     caption_style: str | None = None
+    dynamic_facecam_tracking: bool | None = None
 
 
 class ProfileRead(APISchema):
@@ -93,6 +98,7 @@ class ProfileRead(APISchema):
     watermark: WatermarkConfig | None = None
     ollama_prompt: str | None = None
     caption_style: str
+    dynamic_facecam_tracking: bool = False
     created_at: str
     updated_at: str
 

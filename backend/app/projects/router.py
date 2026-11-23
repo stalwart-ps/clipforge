@@ -28,6 +28,7 @@ from app.projects.schemas import (
     ProjectSummary,
     TranscribeRequest,
     TranscriptData,
+    UpdateClipsRequest,
     UpdateTranscriptRequest,
 )
 from app.projects.service import ProjectService
@@ -143,6 +144,16 @@ async def get_project_clips(
 ) -> list[CandidateClip]:
     """Retrieve ranked candidate clips discovered for this project."""
     return await ProjectService.get_clips(session, project_id)
+
+
+@router.put("/{project_id}/clips", response_model=list[CandidateClip], status_code=status.HTTP_200_OK)
+async def update_project_clips(
+    project_id: str,
+    payload: UpdateClipsRequest,
+    session: AsyncSession = Depends(get_db_session),
+) -> list[CandidateClip]:
+    """Update or save candidate clips (e.g. after merging or reordering)."""
+    return await ProjectService.update_clips(session, project_id, payload.clips)
 
 
 @router.get("/{project_id}/thumbnail")

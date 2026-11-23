@@ -49,7 +49,11 @@ async def start_batch_export(
     if not project.video_path or not Path(project.video_path).is_file():
         raise HTTPException(status_code=404, detail="Project video file not found")
     for clip in payload.clips:
-        _validate_bounds(clip.start_sec, clip.end_sec, project.duration_sec)
+        if clip.segments:
+            for seg in clip.segments:
+                _validate_bounds(seg.start_sec, seg.end_sec, project.duration_sec)
+        else:
+            _validate_bounds(clip.start_sec, clip.end_sec, project.duration_sec)
     wants_subtitles = payload.burn_captions or payload.sidecars.srt or payload.sidecars.ass
     transcript = None
     if wants_subtitles:

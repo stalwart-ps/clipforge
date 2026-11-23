@@ -2,11 +2,12 @@
 
 from typing import Literal
 
-from pydantic import Field
+from pydantic import Field, computed_field
 
 from app.core.schemas import APISchema
 from app.captions.schemas import CaptionConfig
 from app.framing.schemas import FramingConfig
+from app.projects.schemas import ClipSegment
 
 
 class ExportClip(APISchema):
@@ -16,6 +17,20 @@ class ExportClip(APISchema):
     suggested_hashtags: list[str] = []
     start_sec: float = Field(..., ge=0)
     end_sec: float = Field(..., gt=0)
+    segments: list[ClipSegment] = []
+
+    @property
+    def effective_segments(self) -> list[tuple[float, float]]:
+        if self.segments:
+            return [(s.start_sec, s.end_sec) for s in self.segments]
+        return [(self.start_sec, self.end_sec)]
+
+    @computed_field
+    @property
+    def duration_sec(self) -> float:
+        if self.segments:
+            return round(sum(max(0.0, s.end_sec - s.start_sec) for s in self.segments), 2)
+        return round(max(0.0, self.end_sec - self.start_sec), 2)
 
 
 class ExportSidecars(APISchema):
