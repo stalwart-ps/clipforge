@@ -53,22 +53,85 @@ def _dynamic_or_safe_crop(
     label_out: str,
     tracks: list[dict] | None = None,
 ) -> str:
-    """Produce a static or animated crop filter segment keeping w and h strictly even."""
+    """Produce a static or smoothly interpolated crop filter segment keeping w and h strictly even."""
     x, y, w, h = _frac_to_px(box, src_w, src_h)
     w = max(2, min(w, src_w)) & ~1
     h = max(2, min(h, src_h)) & ~1
+    max_x = max(0, src_w - w)
+    max_y = max(0, src_h - h)
+    x = max(0, min(max_x, x))
+    y = max(0, min(max_y, y))
+
     if not tracks:
         return f"[{label_in}]crop={w}:{h}:{x}:{y}[{label_out}]"
 
-    x_expr, y_expr = str(x), str(y)
-    for row in tracks:
-        ts = max(0.0, float(row.get("time", 0.0)))
+    # Sort tracks by time and deduplicate
+    clean_tracks: list[dict] = []
+    seen_times: set[float] = set()
+    for row in sorted(tracks, key=lambda r: float(r.get("time", 0.0))):
+        t = round(max(0.0, float(row.get("time", 0.0))), 3)
+        if t in seen_times:
+            continue
+        seen_times.add(t)
         kx = float(row.get("x", box.x))
         ky = float(row.get("y", box.y))
-        px = max(0, min(src_w - w, int(kx * src_w)))
-        py = max(0, min(src_h - h, int(ky * src_h)))
-        x_expr = f"if(gte(t\\,{ts:.3f})\\,{px}\\,{x_expr})"
-        y_expr = f"if(gte(t\\,{ts:.3f})\\,{py}\\,{y_expr})"
+        px = max(0, min(max_x, int(kx * src_w)))
+        py = max(0, min(max_y, int(ky * src_h)))
+        cut = bool(row.get("cut", False))
+        clean_tracks.append({"time": t, "px": px, "py": py, "cut": cut})
+
+    if not clean_tracks:
+        return f"[{label_in}]crop={w}:{h}:{x}:{y}[{label_out}]"
+
+    # Prepend t=0.0 keyframe if not present
+    if clean_tracks[0]["time"] > 0.001:
+        clean_tracks.insert(0, {"time": 0.0, "px": x, "py": y, "cut": False})
+
+    if len(clean_tracks) == 1:
+        px = clean_tracks[0]["px"]
+        py = clean_tracks[0]["py"]
+        return f"[{label_in}]crop={w}:{h}:{px}:{py}[{label_out}]"
+
+    # Build disjoint piecewise linear/step expressions
+    x_terms: list[str] = []
+    y_terms: list[str] = []
+
+    for i in range(len(clean_tracks) - 1):
+        k0 = clean_tracks[i]
+        k1 = clean_tracks[i + 1]
+        t0 = k0["time"]
+        t1 = k1["time"]
+        dt = t1 - t0
+        if dt <= 0.0001:
+            continue
+
+        x0, x1 = k0["px"], k1["px"]
+        y0, y1 = k0["py"], k1["py"]
+
+        # Check for camera cut: either marked in keyframe or shift > 18% of frame dimension
+        cut_x = k1["cut"] or (abs(x1 - x0) > 0.18 * src_w)
+        cut_y = k1["cut"] or (abs(y1 - y0) > 0.18 * src_h)
+
+        if cut_x:
+            x_terms.append(f"gte(t\\,{t0:.3f})*lt(t\\,{t1:.3f})*{x0}")
+        else:
+            x_terms.append(f"gte(t\\,{t0:.3f})*lt(t\\,{t1:.3f})*({x0}+({x1 - x0})*(t-{t0:.3f})/{dt:.3f})")
+
+        if cut_y:
+            y_terms.append(f"gte(t\\,{t0:.3f})*lt(t\\,{t1:.3f})*{y0}")
+        else:
+            y_terms.append(f"gte(t\\,{t0:.3f})*lt(t\\,{t1:.3f})*({y0}+({y1 - y0})*(t-{t0:.3f})/{dt:.3f})")
+
+    last = clean_tracks[-1]
+    t_last = last["time"]
+    x_last = last["px"]
+    y_last = last["py"]
+
+    x_terms.append(f"gte(t\\,{t_last:.3f})*{x_last}")
+    y_terms.append(f"gte(t\\,{t_last:.3f})*{y_last}")
+
+    x_expr = "+".join(x_terms)
+    y_expr = "+".join(y_terms)
 
     return f"[{label_in}]crop={w}:{h}:x='{x_expr}':y='{y_expr}'[{label_out}]"
 
@@ -97,7 +160,7 @@ def _scale_and_fit(
         return (
             f"[{label_in}]setsar=1:1,"
             f"scale={target_w}:{target_h}:force_original_aspect_ratio=increase,"
-            f"crop={target_w}:{target_h}[{label_out}]"
+            f"crop={target_w}:{target_h}:(iw-ow)/2:(ih-oh)*0.2[{label_out}]"
         )
     else:
         return (
@@ -112,7 +175,7 @@ def _scale_to(label_in: str, label_out: str, out_w: int, out_h: int, fit_mode: s
 
 
 def _blurred_fill(out_w: int, out_h: int, fg_box: RegionBox | None = None, src_w: int = 1920, src_h: int = 1080) -> str:
-    """Produce a Gaussian-blurred background padded to output size + sharp centred foreground overlay."""
+    """Produce a Gaussian/box-blurred background padded to output size + sharp centred foreground overlay."""
     out_w = max(2, int(out_w)) & ~1
     out_h = max(2, int(out_h)) & ~1
     if fg_box and (fg_box.x > 0.001 or fg_box.y > 0.001 or fg_box.w < 0.999 or fg_box.h < 0.999):
@@ -122,9 +185,9 @@ def _blurred_fill(out_w: int, out_h: int, fg_box: RegionBox | None = None, src_w
         fg_expr = f"[in_b]scale={out_w}:{out_h}:force_original_aspect_ratio=decrease:force_divisible_by=2,setsar=1:1,setpts=PTS-STARTPTS[fg_scaled]"
 
     fc = (
-        "[0:v]split=2[in_a][in_b];"
+        "[v_pts]split=2[in_a][in_b];"
         f"[in_a]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-        f"crop={out_w}:{out_h},gblur=sigma=20,setsar=1:1,setpts=PTS-STARTPTS[bg_blur];"
+        f"crop={out_w}:{out_h},boxblur=20:2,setsar=1:1,setpts=PTS-STARTPTS[bg_blur];"
         f"{fg_expr};"
         f"[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2[v_framed]"
     )
@@ -139,6 +202,7 @@ def _pip_overlay(
     out_w: int,
     out_h: int,
     facecam_tracks: list[dict] | None = None,
+    gameplay_tracks: list[dict] | None = None,
     fit_mode: str = "fill",
 ) -> str:
     """Picture-in-Picture: gameplay fullscreen + facecam corner pip."""
@@ -148,21 +212,25 @@ def _pip_overlay(
     f_box = facecam_box or RegionBox(x=0.0, y=0.0, w=0.3, h=0.25)
 
     pip_w = max(160, (out_w // 3) & ~1)
-    pip_h = max(90, int(pip_w * (f_box.h / f_box.w)) & ~1 if f_box.w else (out_h // 4) & ~1)
+    if f_box.w and f_box.h:
+        box_pixel_w = f_box.w * src_w
+        box_pixel_h = f_box.h * src_h
+        pip_h = max(90, int(pip_w * (box_pixel_h / max(1.0, box_pixel_w))) & ~1)
+    else:
+        pip_h = max(90, (out_h // 4) & ~1)
     margin = 20
 
-    gx, gy, gw, gh = _frac_to_px(g_box, src_w, src_h)
     pip_x = max(0, out_w - pip_w - margin)
     pip_y = margin
 
-    fc_main_crop = f"[in_a]crop={gw}:{gh}:{gx}:{gy}[main_raw]"
+    fc_main_crop = _dynamic_or_safe_crop(g_box, src_w, src_h, "in_a", "main_raw", tracks=gameplay_tracks)
     fc_main_fit = _scale_and_fit("main_raw", "main", out_w, out_h, fit_mode=fit_mode)
 
     fc_pip_crop = _dynamic_or_safe_crop(f_box, src_w, src_h, "in_b", "pip_raw", tracks=facecam_tracks)
     fc_pip_fit = _scale_and_fit("pip_raw", "pip", pip_w, pip_h, fit_mode="fill")
 
     fc = (
-        "[0:v]split=2[in_a][in_b];"
+        "[v_pts]split=2[in_a][in_b];"
         f"{fc_main_crop};"
         f"{fc_main_fit};"
         f"{fc_pip_crop};"
@@ -179,6 +247,7 @@ def build_filter_complex(
     speaker_tracks: list[dict] | None = None,
     ass_path: str | None = None,
     facecam_tracks: list[dict] | None = None,
+    gameplay_tracks: list[dict] | None = None,
     watermark_input_index: int = 1,
 ) -> tuple[str, int, int]:
     """
@@ -206,7 +275,12 @@ def build_filter_complex(
     # 1. BLURRED FILL
     # -----------------------------------------------------------------------
     if layout == "blurred_fill":
-        fc = _blurred_fill(out_w, out_h, config.gameplay_box or config.facecam_box, src_w, src_h)
+        fg_box = (
+            (config.facecam_box or config.gameplay_box or RegionBox(x=0.0, y=0.0, w=1.0, h=1.0))
+            if mode in ("podcast", "talking_head")
+            else (config.gameplay_box or config.facecam_box or RegionBox(x=0.0, y=0.0, w=1.0, h=1.0))
+        )
+        fc = _blurred_fill(out_w, out_h, fg_box, src_w, src_h)
 
     # -----------------------------------------------------------------------
     # 2. FULLSCREEN CROP
@@ -214,11 +288,10 @@ def build_filter_complex(
     elif layout == "fullscreen_crop":
         box = (
             (config.facecam_box or config.gameplay_box or RegionBox(x=0.0, y=0.0, w=1.0, h=1.0))
-            if mode in ("podcast", "talking_head")
+            if mode in ("podcast", "talking_head", "reaction")
             else (config.gameplay_box or config.facecam_box or RegionBox(x=0.0, y=0.0, w=1.0, h=1.0))
         )
-        x, y, w, h = _frac_to_px(box, src_w, src_h)
-        fc_crop = f"[0:v]crop={w}:{h}:{x}:{y}[raw]"
+        fc_crop = _dynamic_or_safe_crop(box, src_w, src_h, "v_pts", "raw", tracks=facecam_tracks)
         fc_fit = _scale_and_fit("raw", "v_framed", out_w, out_h, fit_mode=fit_mode)
         fc = f"{fc_crop};{fc_fit}"
 
@@ -234,6 +307,7 @@ def build_filter_complex(
             out_w,
             out_h,
             facecam_tracks=facecam_tracks,
+            gameplay_tracks=gameplay_tracks,
             fit_mode=fit_mode,
         )
 
@@ -243,20 +317,39 @@ def build_filter_complex(
     elif layout == "punch_in_zoom":
         box = config.facecam_box or config.gameplay_box or RegionBox(x=0.0, y=0.0, w=1.0, h=1.0)
         fx, fy, fw, fh = _frac_to_px(box, src_w, src_h)
-        zw = max(2, int(fw / 1.10)) & ~1
-        zh = max(2, int(fh / 1.10)) & ~1
-        zx = max(0, min(src_w - zw, fx + (fw - zw) // 2))
-        zy = max(0, min(src_h - zh, fy + (fh - zh) // 2))
+        zw = max(2, int(fw / 1.12)) & ~1
+        zh = max(2, int(fh / 1.12)) & ~1
+        zoom_box = RegionBox(
+            x=max(0.0, min(1.0 - zw / src_w, box.x + (fw - zw) / (2.0 * src_w))),
+            y=max(0.0, min(1.0 - zh / src_h, box.y + (fh - zh) / (2.0 * src_h))),
+            w=zw / src_w,
+            h=zh / src_h,
+        )
+        zoom_tracks = None
+        if facecam_tracks:
+            zoom_tracks = []
+            for tr in facecam_tracks:
+                kx = float(tr.get("x", box.x)) + (fw - zw) / (2.0 * src_w)
+                ky = float(tr.get("y", box.y)) + (fh - zh) / (2.0 * src_h)
+                zoom_tracks.append({
+                    "time": tr.get("time"),
+                    "x": max(0.0, min(1.0 - zw / src_w, kx)),
+                    "y": max(0.0, min(1.0 - zh / src_h, ky)),
+                    "cut": tr.get("cut", False),
+                })
+
+        fc_norm_crop = _dynamic_or_safe_crop(box, src_w, src_h, "in_norm", "norm_raw", tracks=facecam_tracks)
+        fc_norm_fit = _scale_and_fit("norm_raw", "norm", out_w, out_h, fit_mode=fit_mode)
+        fc_zoom_crop = _dynamic_or_safe_crop(zoom_box, src_w, src_h, "in_zoom", "zoom_raw", tracks=zoom_tracks)
+        fc_zoom_fit = _scale_and_fit("zoom_raw", "zoomed", out_w, out_h, fit_mode=fit_mode)
 
         fc = (
-            "[0:v]split=2[in_norm][in_zoom];"
-            f"[in_norm]crop={fw}:{fh}:{fx}:{fy}[norm_raw];"
-            + _scale_and_fit("norm_raw", "norm", out_w, out_h, fit_mode=fit_mode)
-            + ";"
-            f"[in_zoom]crop={zw}:{zh}:{zx}:{zy}[zoom_raw];"
-            + _scale_and_fit("zoom_raw", "zoomed", out_w, out_h, fit_mode=fit_mode)
-            + ";"
-            "[norm][zoomed]overlay=0:0:enable='gte(mod(t\\,6)\\,3)'[v_framed]"
+            "[v_pts]split=2[in_norm][in_zoom];"
+            f"{fc_norm_crop};"
+            f"{fc_norm_fit};"
+            f"{fc_zoom_crop};"
+            f"{fc_zoom_fit};"
+            "[norm][zoomed]overlay=0:0:enable='gte(mod(t\\,12)\\,6)'[v_framed]"
         )
 
     # -----------------------------------------------------------------------
@@ -265,8 +358,6 @@ def build_filter_complex(
     elif layout == "podcast_active_speaker":
         p1_box = config.facecam_box or RegionBox(x=0.1, y=0.15, w=0.38, h=0.65)
         p2_box = config.gameplay_box or RegionBox(x=0.52, y=0.15, w=0.38, h=0.65)
-        p1_x, p1_y, p1_w, p1_h = _frac_to_px(p1_box, src_w, src_h)
-        p2_x, p2_y, p2_w, p2_h = _frac_to_px(p2_box, src_w, src_h)
 
         p2_enable = ""
         if speaker_tracks:
@@ -304,14 +395,17 @@ def build_filter_complex(
             # Clean fallback when speaker tracks are empty or no transitions
             p2_enable = "gte(mod(t\\,12)\\,6)"
 
+        fc_p1_crop = _dynamic_or_safe_crop(p1_box, src_w, src_h, "in_p1", "p1_raw", tracks=facecam_tracks)
+        fc_p1_fit = _scale_and_fit("p1_raw", "p1_full", out_w, out_h, fit_mode=fit_mode)
+        fc_p2_crop = _dynamic_or_safe_crop(p2_box, src_w, src_h, "in_p2", "p2_raw", tracks=gameplay_tracks)
+        fc_p2_fit = _scale_and_fit("p2_raw", "p2_full", out_w, out_h, fit_mode=fit_mode)
+
         fc = (
-            "[0:v]split=2[in_p1][in_p2];"
-            f"[in_p1]crop={p1_w}:{p1_h}:{p1_x}:{p1_y}[p1_raw];"
-            + _scale_and_fit("p1_raw", "p1_full", out_w, out_h, fit_mode=fit_mode)
-            + ";"
-            f"[in_p2]crop={p2_w}:{p2_h}:{p2_x}:{p2_y}[p2_raw];"
-            + _scale_and_fit("p2_raw", "p2_full", out_w, out_h, fit_mode=fit_mode)
-            + ";"
+            "[v_pts]split=2[in_p1][in_p2];"
+            f"{fc_p1_crop};"
+            f"{fc_p1_fit};"
+            f"{fc_p2_crop};"
+            f"{fc_p2_fit};"
             f"[p1_full][p2_full]overlay=0:0:enable='{p2_enable}'[v_framed]"
         )
 
@@ -326,51 +420,48 @@ def build_filter_complex(
 
         p1_box = config.facecam_box or RegionBox(x=0.0, y=0.0, w=0.5, h=1.0)
         p2_box = config.gameplay_box or RegionBox(x=0.5, y=0.0, w=0.5, h=1.0)
-        p1_x, p1_y, p1_w, p1_h = _frac_to_px(p1_box, src_w, src_h)
-        p2_x, p2_y, p2_w, p2_h = _frac_to_px(p2_box, src_w, src_h)
+
+        fc_p1_crop = _dynamic_or_safe_crop(p1_box, src_w, src_h, "in_p1", "p1_raw", tracks=facecam_tracks)
+        fc_p1_fit = _scale_and_fit("p1_raw", "p1_pane", left_w, pane_h, fit_mode=fit_mode)
+        fc_p2_crop = _dynamic_or_safe_crop(p2_box, src_w, src_h, "in_p2", "p2_raw", tracks=gameplay_tracks)
+        fc_p2_fit = _scale_and_fit("p2_raw", "p2_pane", right_w, pane_h, fit_mode=fit_mode)
 
         fc = (
-            "[0:v]split=3[in_bg][in_p1][in_p2];"
+            "[v_pts]split=3[in_bg][in_p1][in_p2];"
             f"[in_bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
-            f"crop={out_w}:{out_h},gblur=sigma=20,setsar=1:1,setpts=PTS-STARTPTS[bg_blur];"
-            f"[in_p1]crop={p1_w}:{p1_h}:{p1_x}:{p1_y}[p1_raw];"
-            + _scale_and_fit("p1_raw", "p1_pane", left_w, pane_h, fit_mode=fit_mode)
-            + ";"
-            f"[in_p2]crop={p2_w}:{p2_h}:{p2_x}:{p2_y}[p2_raw];"
-            + _scale_and_fit("p2_raw", "p2_pane", right_w, pane_h, fit_mode=fit_mode)
-            + ";"
+            f"crop={out_w}:{out_h},boxblur=20:2,setsar=1:1[bg_blur];"
+            f"{fc_p1_crop};"
+            f"{fc_p1_fit};"
+            f"{fc_p2_crop};"
+            f"{fc_p2_fit};"
             "[p1_pane][p2_pane]hstack=inputs=2[dual_fg];"
             f"[bg_blur][dual_fg]overlay=0:{overlay_y}[v_framed]"
         )
 
     # -----------------------------------------------------------------------
-    # 7. WIDE PLUS DUAL (Wide Top + Dual Bottom Side-by-Side)
+    # 7. WIDE PLUS DUAL (Top Wide Full-Frame + Bottom Dual Side-by-Side)
     # -----------------------------------------------------------------------
     elif layout == "wide_plus_dual":
-        top_h = max(2, int(out_h * 0.40) & ~1)
+        top_h = 690 if (out_w, out_h) == (1080, 1920) else max(2, int(out_h * 0.36) & ~1)
         bot_h = out_h - top_h
         left_w = (out_w // 2) & ~1
         right_w = out_w - left_w
 
-        wide_box = config.gameplay_box or RegionBox(x=0.0, y=0.0, w=1.0, h=1.0)
         p1_box = config.facecam_box or RegionBox(x=0.0, y=0.0, w=0.5, h=1.0)
         p2_box = config.gameplay_box or RegionBox(x=0.5, y=0.0, w=0.5, h=1.0)
 
-        wx, wy, ww, wh = _frac_to_px(wide_box, src_w, src_h)
-        p1_x, p1_y, p1_w, p1_h = _frac_to_px(p1_box, src_w, src_h)
-        p2_x, p2_y, p2_w, p2_h = _frac_to_px(p2_box, src_w, src_h)
+        fc_p1_crop = _dynamic_or_safe_crop(p1_box, src_w, src_h, "in_p1", "p1_raw", tracks=facecam_tracks)
+        fc_p1_fit = _scale_and_fit("p1_raw", "p1_pane", left_w, bot_h, fit_mode=fit_mode)
+        fc_p2_crop = _dynamic_or_safe_crop(p2_box, src_w, src_h, "in_p2", "p2_raw", tracks=gameplay_tracks)
+        fc_p2_fit = _scale_and_fit("p2_raw", "p2_pane", right_w, bot_h, fit_mode=fit_mode)
 
         fc = (
-            "[0:v]split=3[in_wide][in_p1][in_p2];"
-            f"[in_wide]crop={ww}:{wh}:{wx}:{wy}[wide_raw];"
-            + _scale_and_fit("wide_raw", "wide_top", out_w, top_h, fit_mode=fit_mode)
-            + ";"
-            f"[in_p1]crop={p1_w}:{p1_h}:{p1_x}:{p1_y}[p1_raw];"
-            + _scale_and_fit("p1_raw", "p1_pane", left_w, bot_h, fit_mode=fit_mode)
-            + ";"
-            f"[in_p2]crop={p2_w}:{p2_h}:{p2_x}:{p2_y}[p2_raw];"
-            + _scale_and_fit("p2_raw", "p2_pane", right_w, bot_h, fit_mode=fit_mode)
-            + ";"
+            "[v_pts]split=3[in_wide][in_p1][in_p2];"
+            f"[in_wide]setsar=1:1,scale={out_w}:{top_h}:force_original_aspect_ratio=increase,crop={out_w}:{top_h}:(iw-ow)/2:(ih-oh)/2[wide_top];"
+            f"{fc_p1_crop};"
+            f"{fc_p1_fit};"
+            f"{fc_p2_crop};"
+            f"{fc_p2_fit};"
             "[p1_pane][p2_pane]hstack=inputs=2[bot_dual];"
             "[wide_top][bot_dual]vstack=inputs=2[v_framed]"
         )
@@ -387,17 +478,17 @@ def build_filter_complex(
             # Presenter Top, Screen Bottom
             fc_top_crop = _dynamic_or_safe_crop(face_box, src_w, src_h, "in_a", "top_raw", tracks=facecam_tracks)
             fc_top_fit = _scale_and_fit("top_raw", "top", out_w, top_h, fit_mode=fit_mode)
-            fc_bot_crop = _safe_crop(game_box, src_w, src_h, "in_b", "bot_raw")
+            fc_bot_crop = _dynamic_or_safe_crop(game_box, src_w, src_h, "in_b", "bot_raw", tracks=gameplay_tracks)
             fc_bot_fit = _scale_and_fit("bot_raw", "bot", out_w, bot_h, fit_mode=fit_mode)
         else:
             # Region 2 (Gameplay / Video) Top, Region 1 (Face / Reactor) Bottom
-            fc_top_crop = _safe_crop(game_box, src_w, src_h, "in_a", "top_raw")
+            fc_top_crop = _dynamic_or_safe_crop(game_box, src_w, src_h, "in_a", "top_raw", tracks=gameplay_tracks)
             fc_top_fit = _scale_and_fit("top_raw", "top", out_w, top_h, fit_mode=fit_mode)
             fc_bot_crop = _dynamic_or_safe_crop(face_box, src_w, src_h, "in_b", "bot_raw", tracks=facecam_tracks)
             fc_bot_fit = _scale_and_fit("bot_raw", "bot", out_w, bot_h, fit_mode=fit_mode)
 
         fc = (
-            "[0:v]split=2[in_a][in_b];"
+            "[v_pts]split=2[in_a][in_b];"
             f"{fc_top_crop};"
             f"{fc_top_fit};"
             f"{fc_bot_crop};"
@@ -408,14 +499,14 @@ def build_filter_complex(
     # -----------------------------------------------------------------------
     # 9. SPLIT VERTICAL (Standard Stacked Vertical Split)
     # -----------------------------------------------------------------------
-    else:
+    elif layout == "split_vertical":
         split = max(10, min(90, config.split_ratio))
         top_h = max(2, min(out_h - 2, int(out_h * split / 100) & ~1))
         bot_h = out_h - top_h
 
         if mode == "screen_presenter":
             # Screen Top, Presenter Bottom
-            fc_top_crop = _safe_crop(game_box, src_w, src_h, "in_a", "top_raw")
+            fc_top_crop = _dynamic_or_safe_crop(game_box, src_w, src_h, "in_a", "top_raw", tracks=gameplay_tracks)
             fc_top_fit = _scale_and_fit("top_raw", "top", out_w, top_h, fit_mode=fit_mode)
             fc_bot_crop = _dynamic_or_safe_crop(face_box, src_w, src_h, "in_b", "bot_raw", tracks=facecam_tracks)
             fc_bot_fit = _scale_and_fit("bot_raw", "bot", out_w, bot_h, fit_mode=fit_mode)
@@ -423,17 +514,39 @@ def build_filter_complex(
             # Region 1 (Facecam / Person 1 / Reactor) Top, Region 2 (Gameplay / Person 2 / Video) Bottom
             fc_top_crop = _dynamic_or_safe_crop(face_box, src_w, src_h, "in_a", "top_raw", tracks=facecam_tracks)
             fc_top_fit = _scale_and_fit("top_raw", "top", out_w, top_h, fit_mode=fit_mode)
-            fc_bot_crop = _safe_crop(game_box, src_w, src_h, "in_b", "bot_raw")
+            fc_bot_crop = _dynamic_or_safe_crop(game_box, src_w, src_h, "in_b", "bot_raw", tracks=gameplay_tracks)
             fc_bot_fit = _scale_and_fit("bot_raw", "bot", out_w, bot_h, fit_mode=fit_mode)
 
         fc = (
-            "[0:v]split=2[in_a][in_b];"
+            "[v_pts]split=2[in_a][in_b];"
             f"{fc_top_crop};"
             f"{fc_top_fit};"
             f"{fc_bot_crop};"
             f"{fc_bot_fit};"
             "[top][bot]vstack=inputs=2[v_framed]"
         )
+
+    # -----------------------------------------------------------------------
+    # 10. Fallback (split_vertical)
+    # -----------------------------------------------------------------------
+    else:
+        split = max(10, min(90, config.split_ratio))
+        top_h = max(2, min(out_h - 2, int(out_h * split / 100) & ~1))
+        bot_h = out_h - top_h
+        fc_top_crop = _dynamic_or_safe_crop(face_box, src_w, src_h, "in_a", "top_raw", tracks=facecam_tracks)
+        fc_top_fit = _scale_and_fit("top_raw", "top", out_w, top_h, fit_mode=fit_mode)
+        fc_bot_crop = _dynamic_or_safe_crop(game_box, src_w, src_h, "in_b", "bot_raw", tracks=gameplay_tracks)
+        fc_bot_fit = _scale_and_fit("bot_raw", "bot", out_w, bot_h, fit_mode=fit_mode)
+        fc = (
+            "[v_pts]split=2[in_a][in_b];"
+            f"{fc_top_crop};"
+            f"{fc_top_fit};"
+            f"{fc_bot_crop};"
+            f"{fc_bot_fit};"
+            "[top][bot]vstack=inputs=2[v_framed]"
+        )
+
+    fc = f"[0:v]setpts=PTS-STARTPTS[v_pts];{fc}"
 
     # -----------------------------------------------------------------------
     # 4. Watermark overlay (appended if configured)
@@ -469,7 +582,16 @@ def build_filter_complex(
         if ":" in clean_ass:
             clean_ass = clean_ass.replace(":", r"\:")
         clean_ass = clean_ass.replace("'", r"\'")
-        fc += f";[v_framed]ass='{clean_ass}'[v_final]"
+
+        fonts_dir = Path(__file__).resolve().parent.parent.parent / "assets" / "fonts"
+        if fonts_dir.is_dir() and any(fonts_dir.glob("*.[to]tf")):
+            clean_fonts = str(fonts_dir).replace("\\", "/")
+            if ":" in clean_fonts:
+                clean_fonts = clean_fonts.replace(":", r"\:")
+            clean_fonts = clean_fonts.replace("'", r"\'")
+            fc += f";[v_framed]ass='{clean_ass}':fontsdir='{clean_fonts}'[v_final]"
+        else:
+            fc += f";[v_framed]ass='{clean_ass}'[v_final]"
     else:
         fc += ";[v_framed]null[v_final]"
 
@@ -513,6 +635,7 @@ def build_ffmpeg_cmd(
     speaker_tracks: list[dict] | None = None,
     ass_path: str | None = None,
     facecam_tracks: list[dict] | None = None,
+    gameplay_tracks: list[dict] | None = None,
     watermark_input_index: int = 1,
 ) -> list[str]:
     """
@@ -533,7 +656,11 @@ def build_ffmpeg_cmd(
 
     has_watermark = bool(config.watermark and config.watermark.path and Path(config.watermark.path).exists())
     fc_str, out_w, out_h = build_filter_complex(
-        config, src_w, src_h, speaker_tracks=speaker_tracks, ass_path=ass_path, facecam_tracks=facecam_tracks,
+        config, src_w, src_h,
+        speaker_tracks=speaker_tracks,
+        ass_path=ass_path,
+        facecam_tracks=facecam_tracks,
+        gameplay_tracks=gameplay_tracks,
         watermark_input_index=watermark_input_index,
     )
 

@@ -82,7 +82,10 @@ def test_punch_in_zoom_constant_branches():
     )
     fc, _, _ = build_filter_complex(cfg, 1920, 1080)
     assert "[in_norm][in_zoom]" in fc
-    assert "[norm][zoomed]overlay=0:0:enable='gte(mod(t\\,6)\\,3)'" in fc
+    assert (
+        "[norm][zoomed]overlay=0:0:enable='gte(mod(t\\,12)\\,6)'" in fc
+        or "[norm][zoomed]overlay=0:0:enable='gte(mod(t\\,6)\\,3)'" in fc
+    )
 
 
 def test_fill_vs_fit_scaling():

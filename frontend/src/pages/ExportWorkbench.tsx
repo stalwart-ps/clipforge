@@ -8,9 +8,30 @@ import { CandidateClip, CaptionConfig, FramingConfig, FramingMode, LayoutTemplat
 type Bounds = { startSec: number; endSec: number };
 
 const DEFAULT_CAPTIONS: CaptionConfig = {
-  preset: 'hormozi_pop', fontName: 'Arial Black', fontSize: 78, primaryColor: '#FFFFFF',
-  highlightColor: '#FFE600', outlineColor: '#000000', outlineWidth: 6, shadowDepth: 3,
-  marginV: 180, maxWordsPerLine: 3, allCaps: true, animation: 'pop', profanityMask: false,
+  preset: 'hormozi_pop',
+  fontName: 'Arial Black',
+  fontSize: 78,
+  primaryColor: '#FFFFFF',
+  highlightColor: '#FFE600',
+  outlineColor: '#000000',
+  outlineWidth: 6,
+  shadowDepth: 3,
+  shadowBlur: 0,
+  shadowColor: '#000000',
+  marginV: 180,
+  positionYPercent: 80,
+  maxWordsPerLine: 3,
+  allCaps: true,
+  animation: 'pop',
+  animationStyle: 'pop_bounce',
+  secondaryFont: 'Georgia',
+  fontSwitchMode: 'none',
+  secondaryItalic: true,
+  glowEnabled: false,
+  glowColor: '#00F5FF',
+  glowIntensity: 12,
+  letterSpacing: 0,
+  profanityMask: false,
 };
 
 const DEFAULT_FRAMING: FramingConfig = {
@@ -552,7 +573,7 @@ export const ExportWorkbench: React.FC = () => {
           <span className="text-slate-500">·</span>
           <span>Layout: <strong className="text-white">{options.framingConfig.layoutTemplate.replace(/_/g, ' ')}</strong> ({options.framingConfig.aspectRatio} · {options.framingConfig.paneFitMode || 'fill'})</span>
           <span className="text-slate-500">·</span>
-          <span>Captions: <strong className="text-white">{options.burnCaptions ? options.captionConfig.preset.replace(/_/g, ' ') : 'off'}</strong></span>
+          <span>Captions: <strong className="text-white">{options.burnCaptions ? `${options.captionConfig.preset.replace(/_/g, ' ')}${options.captionConfig.glowEnabled ? ' (glow)' : ''}` : 'off'}</strong></span>
           <span className="text-slate-500">·</span>
           <span>Clips: <strong className="text-white">{selectedIds.size}</strong> selected</span>
         </div>

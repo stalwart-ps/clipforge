@@ -36,8 +36,31 @@ export interface TranscriptData {
   segments: TranscriptSegment[];
 }
 
-export type CaptionPreset = 'hormozi_pop' | 'karaoke_highlight' | 'minimal_clean' | 'gaming_neon' | 'boxed_pill';
+export type CaptionPreset =
+  | 'hormozi_pop'
+  | 'karaoke_highlight'
+  | 'minimal_clean'
+  | 'gaming_neon'
+  | 'boxed_pill'
+  | 'editorial_mix'
+  | 'cyber_neon_glow'
+  | 'cinematic_blur'
+  | 'kinetic_impact'
+  | 'slide_up_smooth'
+  | 'highlighter_pill'
+  | 'typewriter_tech';
+
 export type CaptionAnimation = 'none' | 'pop' | 'highlight' | 'bounce';
+export type FontSwitchMode = 'none' | 'active_word' | 'emphasis_words' | 'alternate_lines';
+export type AnimationStyle =
+  | 'none'
+  | 'pop_bounce'
+  | 'slide_up'
+  | 'blur_reveal'
+  | 'word_highlight'
+  | 'typewriter'
+  | 'kinetic_tilt'
+  | 'glow_pulse';
 
 export interface CaptionConfig {
   preset: CaptionPreset;
@@ -48,12 +71,24 @@ export interface CaptionConfig {
   outlineColor: string;
   outlineWidth: number;
   shadowDepth: number;
+  shadowBlur?: number;
+  shadowColor?: string;
   marginV: number;
   positionYPercent?: number;
   maxWordsPerLine: number;
   allCaps: boolean;
   animation: CaptionAnimation;
   profanityMask: boolean;
+
+  // Stylized & animated templates expansion
+  secondaryFont?: string;
+  fontSwitchMode?: FontSwitchMode;
+  secondaryItalic?: boolean;
+  glowEnabled?: boolean;
+  glowColor?: string;
+  glowIntensity?: number;
+  animationStyle?: AnimationStyle;
+  letterSpacing?: number;
 }
 
 export interface CaptionGenerateResponse {

@@ -221,11 +221,17 @@ export const api = {
     timeSec: number = 5.0,
     framingMode: string = 'gaming',
     tightness: string = 'medium',
+    layoutTemplate: string = 'split_vertical',
+    aspectRatio: string = '9:16',
+    splitRatio: number = 50,
   ): Promise<AutoDetectResult> {
     const params = new URLSearchParams({
       t: String(timeSec),
       framing_mode: framingMode,
       tightness,
+      layout_template: layoutTemplate,
+      aspect_ratio: aspectRatio,
+      split_ratio: String(splitRatio),
     });
     const res = await fetch(
       `${BASE_URL}/api/projects/${projectId}/auto-detect-regions?${params.toString()}`,

@@ -1,0 +1,524 @@
+﻿=== service.py (315-385: has_audio & setup) ===
+    src_h: int,
+    duration_sec: float | None,
+    transcript: TranscriptData | None,
+    has_audio: bool,
+) -> None:
+    job = _JOBS[job_id]
+    output_dir = settings.cache_dir / "projects" / job.project_id / "renders" / "exports" / job_id
+    output_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        job.status = "running"
+        await _publish(job_id)
+
+        request.framing_config = await _resolve_framing_config(job.project_id, request.framing_config)
+        request.caption_config = await _resolve_caption_config(job.project_id, request.caption_config)
+
+        logger.info(
+            "=== EXPORT JOB START === job_id=%s project_id=%s clips=%d\n"
+            "  framing_config: %s\n"
+            "  caption_config: %s\n"
+            "  burn_captions: %s",
+            job_id, job.project_id, len(clips),
+            request.framing_config.model_dump(),
+            request.caption_config.model_dump(),
+            request.burn_captions,
+        )
+
+        for index, clip in enumerate(clips):
+            if await _cancelled(job_id):
+                break
+
+            # Multi-segment support: consume clip.segments or fall back to single range
+            if clip.segments and len(clip.segments) > 0:
+                base_segments = [
+                    (max(0.0, s.start_sec), min(s.end_sec, duration_sec) if duration_sec else s.end_sec)
+                    for s in clip.segments
+                    if s.end_sec > s.start_sec
+                ][:8]
+            else:
+                s_start = max(0.0, clip.start_sec)
+                s_end = min(clip.end_sec, duration_sec) if duration_sec else clip.end_sec
+                base_segments = [(s_start, s_end)] if s_end > s_start else []
+
+            if not base_segments:
+                raise ValueError(f"Clip {clip.title!r} has invalid bounds or segments")
+
+            start = base_segments[0][0]
+            end = base_segments[-1][1]
+            job.current_clip = clip.title
+            await _publish(job_id)
+
+            if request.remove_silence:
+                all_kept = []
+                for seg_start, seg_end in base_segments:
+                    silences = await _silences(
+                        job_id, video_path, seg_start, seg_end,
+                        request.silence_threshold_db, request.silence_min_duration_sec,
+                    )
+                    all_kept.extend(calculate_keep_intervals(seg_start, seg_end, silences))
+                kept = all_kept[:20] if all_kept else base_segments
+            else:
+                kept = base_segments
+
+            if await _cancelled(job_id):
+                break
+
+            clip_transcript = map_transcript(transcript, kept) if transcript else None
+            out_stem = _safe_name(f"{clip.title}_{index + 1}")
+            final_path = output_dir / f"{out_stem}.mp4"
+            temp_path = output_dir / f"{out_stem}.partial.mp4"
+
+            # 1. Determine base canvas dimensions
+
+=== service.py (475-510: build_export_command call) ===
+                gameplay_tracks=gameplay_tracks,
+                watermark_input_index=len(base_segments),
+            )
+            watermark = request.framing_config.watermark
+            progress_duration = sum(right - left for left, right in kept)
+
+            async def report(percent: int) -> None:
+                job.progress_percent = round(100 * (index + percent / 100) / len(clips), 1)
+                await _publish(job_id)
+
+            encoder_used = ""
+            for encoder in ("h264_nvenc", "libx264"):
+                command = build_export_command(
+                    video_path, str(temp_path), framing, out_w, out_h, start, end,
+                    encoder, kept, request.normalize_loudness,
+                    has_audio=has_audio,
+                    watermark_path=watermark.path if watermark else None,
+                    segments=base_segments,
+                )
+
+                # Export Debug Logging on every export
+                first_15_ass = ""
+                if ass_file_path and ass_file_path.is_file():
+                    lines = ass_file_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()[:15]
+                    first_15_ass = "\n".join(f"    {ln}" for ln in lines)
+                else:
+                    first_15_ass = "    (no captions burned)"
+
+                cmd_str = " ".join(command)
+                print(f"\n[CLIPFORGE EXPORT FFMPEG COMMAND]\n{cmd_str}\n", flush=True)
+                debug_log = (
+                    f"\n{'='*75}\n"
+                    f"[CLIPFORGE EXPORT DEBUG]\n"
+                    f"  Job ID:           {job_id}\n"
+                    f"  Clip:             {clip.title} (idx={index + 1}, {start:.2f}s - {end:.2f}s)\n"
+                    f"  Layout Template:  {request.framing_config.layout_template}\n"
+
+=== auto_detect.py (track_facecam) ===
+
+> backend\app\framing\auto_detect.py:128:async def track_facecam_overlay(
+  backend\app\framing\auto_detect.py:129:    video_path: str,
+  backend\app\framing\auto_detect.py:130:    start_sec: float,
+  backend\app\framing\auto_detect.py:131:    end_sec: float,
+  backend\app\framing\auto_detect.py:132:    facecam_box: dict | RegionBox,
+  backend\app\framing\auto_detect.py:133:    framing_mode: str = "gaming",
+  backend\app\framing\auto_detect.py:134:) -> list[dict]:
+  backend\app\framing\auto_detect.py:135:    """Run dynamic facecam tracking in the isolated vision worker 
+subprocess."""
+  backend\app\framing\auto_detect.py:136:    box_dict = facecam_box.model_dump() if hasattr(facecam_box, "model_dump") 
+else dict(facecam_box)
+  backend\app\framing\auto_detect.py:137:    worker_script = settings.backend_dir / "workers" / "vision_worker.py"
+  backend\app\framing\auto_detect.py:138:    output_json = settings.temp_dir / f"facecam_{abs(hash((video_path, 
+start_sec, end_sec, json.dumps(box_dict), framing_mode)))}.json"
+  backend\app\framing\auto_detect.py:139:    cmd = [
+  backend\app\framing\auto_detect.py:140:        sys.executable,
+  backend\app\framing\auto_detect.py:141:        str(worker_script),
+  backend\app\framing\auto_detect.py:142:        "--video-path",
+  backend\app\framing\auto_detect.py:143:        video_path,
+> backend\app\framing\auto_detect.py:144:        "--track-facecam",
+  backend\app\framing\auto_detect.py:145:        "--track-start",
+  backend\app\framing\auto_detect.py:146:        str(start_sec),
+  backend\app\framing\auto_detect.py:147:        "--track-end",
+  backend\app\framing\auto_detect.py:148:        str(end_sec),
+  backend\app\framing\auto_detect.py:149:        "--facecam-box",
+  backend\app\framing\auto_detect.py:150:        json.dumps(box_dict),
+  backend\app\framing\auto_detect.py:151:        "--framing-mode",
+  backend\app\framing\auto_detect.py:152:        framing_mode,
+  backend\app\framing\auto_detect.py:153:        "--output-json",
+  backend\app\framing\auto_detect.py:154:        str(output_json),
+  backend\app\framing\auto_detect.py:155:    ]
+  backend\app\framing\auto_detect.py:156:    try:
+  backend\app\framing\auto_detect.py:157:        await asyncio.to_thread(_run_vision_subprocess, cmd, max(120.0, 
+(end_sec - start_sec) * 3))
+  backend\app\framing\auto_detect.py:158:        if output_json.exists():
+  backend\app\framing\auto_detect.py:159:            payload = json.loads(output_json.read_text(encoding="utf-8"))
+  backend\app\framing\auto_detect.py:160:            return payload.get("tracks", [])
+  backend\app\framing\auto_detect.py:161:        return []
+  backend\app\framing\auto_detect.py:162:    except Exception:
+  backend\app\framing\auto_detect.py:163:        return []
+  backend\app\framing\auto_detect.py:164:    finally:
+  backend\app\framing\auto_detect.py:165:        output_json.unlink(missing_ok=True)
+  backend\app\framing\auto_detect.py:166:
+
+
+
+
+=== ffmpeg_builder.py (tracks usage) ===
+
+  backend\app\framing\ffmpeg_builder.py:202:    out_w: int,
+  backend\app\framing\ffmpeg_builder.py:203:    out_h: int,
+> backend\app\framing\ffmpeg_builder.py:204:    facecam_tracks: list[dict] | None = None,
+> backend\app\framing\ffmpeg_builder.py:205:    gameplay_tracks: list[dict] | None = None,
+  backend\app\framing\ffmpeg_builder.py:206:    fit_mode: str = "fill",
+  backend\app\framing\ffmpeg_builder.py:207:) -> str:
+  backend\app\framing\ffmpeg_builder.py:208:    """Picture-in-Picture: gameplay fullscreen + facecam corner pip."""
+  backend\app\framing\ffmpeg_builder.py:209:    out_w = max(2, int(out_w)) & ~1
+  backend\app\framing\ffmpeg_builder.py:210:    out_h = max(2, int(out_h)) & ~1
+  backend\app\framing\ffmpeg_builder.py:211:    g_box = gameplay_box or RegionBox(x=0.0, y=0.0, w=1.0, h=1.0)
+  backend\app\framing\ffmpeg_builder.py:212:    f_box = facecam_box or RegionBox(x=0.0, y=0.0, w=0.3, h=0.25)
+  backend\app\framing\ffmpeg_builder.py:213:
+  backend\app\framing\ffmpeg_builder.py:214:    pip_w = max(160, (out_w // 3) & ~1)
+  backend\app\framing\ffmpeg_builder.py:215:    if f_box.w and f_box.h:
+  backend\app\framing\ffmpeg_builder.py:216:        box_pixel_w = f_box.w * src_w
+  backend\app\framing\ffmpeg_builder.py:217:        box_pixel_h = f_box.h * src_h
+  backend\app\framing\ffmpeg_builder.py:224:    pip_y = margin
+  backend\app\framing\ffmpeg_builder.py:225:
+> backend\app\framing\ffmpeg_builder.py:226:    fc_main_crop = _dynamic_or_safe_crop(g_box, src_w, src_h, "in_a", 
+"main_raw", tracks=gameplay_tracks)
+  backend\app\framing\ffmpeg_builder.py:227:    fc_main_fit = _scale_and_fit("main_raw", "main", out_w, out_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:228:
+> backend\app\framing\ffmpeg_builder.py:229:    fc_pip_crop = _dynamic_or_safe_crop(f_box, src_w, src_h, "in_b", 
+"pip_raw", tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:230:    fc_pip_fit = _scale_and_fit("pip_raw", "pip", pip_w, pip_h, 
+fit_mode="fill")
+  backend\app\framing\ffmpeg_builder.py:231:
+  backend\app\framing\ffmpeg_builder.py:232:    fc = (
+  backend\app\framing\ffmpeg_builder.py:233:        "[v_pts]split=2[in_a][in_b];"
+  backend\app\framing\ffmpeg_builder.py:234:        f"{fc_main_crop};"
+  backend\app\framing\ffmpeg_builder.py:235:        f"{fc_main_fit};"
+  backend\app\framing\ffmpeg_builder.py:236:        f"{fc_pip_crop};"
+  backend\app\framing\ffmpeg_builder.py:237:        f"{fc_pip_fit};"
+  backend\app\framing\ffmpeg_builder.py:238:        f"[main][pip]overlay={pip_x}:{pip_y}[v_framed]"
+  backend\app\framing\ffmpeg_builder.py:239:    )
+  backend\app\framing\ffmpeg_builder.py:240:    return fc
+  backend\app\framing\ffmpeg_builder.py:241:
+  backend\app\framing\ffmpeg_builder.py:247:    speaker_tracks: list[dict] | None = None,
+  backend\app\framing\ffmpeg_builder.py:248:    ass_path: str | None = None,
+> backend\app\framing\ffmpeg_builder.py:249:    facecam_tracks: list[dict] | None = None,
+> backend\app\framing\ffmpeg_builder.py:250:    gameplay_tracks: list[dict] | None = None,
+  backend\app\framing\ffmpeg_builder.py:251:    watermark_input_index: int = 1,
+  backend\app\framing\ffmpeg_builder.py:252:) -> tuple[str, int, int]:
+  backend\app\framing\ffmpeg_builder.py:253:    """
+  backend\app\framing\ffmpeg_builder.py:254:    Build the -filter_complex string for the given FramingConfig.
+  backend\app\framing\ffmpeg_builder.py:255:
+  backend\app\framing\ffmpeg_builder.py:256:    Returns:
+  backend\app\framing\ffmpeg_builder.py:257:        (filter_complex_str, out_w, out_h)
+  backend\app\framing\ffmpeg_builder.py:258:
+  backend\app\framing\ffmpeg_builder.py:259:    The framed video label is [v_framed], chained into [v_final] (with 
+optional ass filter).
+  backend\app\framing\ffmpeg_builder.py:260:    Audio stream [0:a] is passed through unchanged via -map [v_final] -map 
+0:a.
+  backend\app\framing\ffmpeg_builder.py:261:    """
+  backend\app\framing\ffmpeg_builder.py:262:    out_w, out_h = ASPECT_DIMENSIONS.get(config.aspect_ratio, (1080, 1920))
+  backend\app\framing\ffmpeg_builder.py:292:            else (config.gameplay_box or config.facecam_box or 
+RegionBox(x=0.0, y=0.0, w=1.0, h=1.0))
+  backend\app\framing\ffmpeg_builder.py:293:        )
+> backend\app\framing\ffmpeg_builder.py:294:        fc_crop = _dynamic_or_safe_crop(box, src_w, src_h, "v_pts", "raw", 
+tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:295:        fc_fit = _scale_and_fit("raw", "v_framed", out_w, out_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:296:        fc = f"{fc_crop};{fc_fit}"
+  backend\app\framing\ffmpeg_builder.py:297:
+  backend\app\framing\ffmpeg_builder.py:298:    # 
+-----------------------------------------------------------------------
+  backend\app\framing\ffmpeg_builder.py:299:    # 3. PICTURE-IN-PICTURE (PIP)
+  backend\app\framing\ffmpeg_builder.py:300:    # 
+-----------------------------------------------------------------------
+  backend\app\framing\ffmpeg_builder.py:301:    elif layout == "pip":
+  backend\app\framing\ffmpeg_builder.py:302:        fc = _pip_overlay(
+  backend\app\framing\ffmpeg_builder.py:303:            config.gameplay_box,
+  backend\app\framing\ffmpeg_builder.py:304:            config.facecam_box,
+  backend\app\framing\ffmpeg_builder.py:305:            src_w,
+  backend\app\framing\ffmpeg_builder.py:306:            src_h,
+  backend\app\framing\ffmpeg_builder.py:307:            out_w,
+  backend\app\framing\ffmpeg_builder.py:308:            out_h,
+> backend\app\framing\ffmpeg_builder.py:309:            facecam_tracks=facecam_tracks,
+> backend\app\framing\ffmpeg_builder.py:310:            gameplay_tracks=gameplay_tracks,
+  backend\app\framing\ffmpeg_builder.py:311:            fit_mode=fit_mode,
+  backend\app\framing\ffmpeg_builder.py:312:        )
+  backend\app\framing\ffmpeg_builder.py:313:
+  backend\app\framing\ffmpeg_builder.py:314:    # 
+-----------------------------------------------------------------------
+  backend\app\framing\ffmpeg_builder.py:315:    # 4. PUNCH-IN ZOOM (Talking Head)
+  backend\app\framing\ffmpeg_builder.py:316:    # 
+-----------------------------------------------------------------------
+  backend\app\framing\ffmpeg_builder.py:317:    elif layout == "punch_in_zoom":
+  backend\app\framing\ffmpeg_builder.py:318:        box = config.facecam_box or config.gameplay_box or 
+RegionBox(x=0.0, y=0.0, w=1.0, h=1.0)
+  backend\app\framing\ffmpeg_builder.py:319:        fx, fy, fw, fh = _frac_to_px(box, src_w, src_h)
+  backend\app\framing\ffmpeg_builder.py:320:        zw = max(2, int(fw / 1.12)) & ~1
+  backend\app\framing\ffmpeg_builder.py:321:        zh = max(2, int(fh / 1.12)) & ~1
+  backend\app\framing\ffmpeg_builder.py:322:        zoom_box = RegionBox(
+  backend\app\framing\ffmpeg_builder.py:327:        )
+  backend\app\framing\ffmpeg_builder.py:328:        zoom_tracks = None
+> backend\app\framing\ffmpeg_builder.py:329:        if facecam_tracks:
+  backend\app\framing\ffmpeg_builder.py:330:            zoom_tracks = []
+> backend\app\framing\ffmpeg_builder.py:331:            for tr in facecam_tracks:
+  backend\app\framing\ffmpeg_builder.py:332:                kx = float(tr.get("x", box.x)) + (fw - zw) / (2.0 * src_w)
+  backend\app\framing\ffmpeg_builder.py:333:                ky = float(tr.get("y", box.y)) + (fh - zh) / (2.0 * src_h)
+  backend\app\framing\ffmpeg_builder.py:334:                zoom_tracks.append({
+  backend\app\framing\ffmpeg_builder.py:335:                    "time": tr.get("time"),
+  backend\app\framing\ffmpeg_builder.py:336:                    "x": max(0.0, min(1.0 - zw / src_w, kx)),
+  backend\app\framing\ffmpeg_builder.py:337:                    "y": max(0.0, min(1.0 - zh / src_h, ky)),
+  backend\app\framing\ffmpeg_builder.py:338:                    "cut": tr.get("cut", False),
+  backend\app\framing\ffmpeg_builder.py:339:                })
+  backend\app\framing\ffmpeg_builder.py:340:
+> backend\app\framing\ffmpeg_builder.py:341:        fc_norm_crop = _dynamic_or_safe_crop(box, src_w, src_h, "in_norm", 
+"norm_raw", tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:342:        fc_norm_fit = _scale_and_fit("norm_raw", "norm", out_w, out_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:343:        fc_zoom_crop = _dynamic_or_safe_crop(zoom_box, src_w, src_h, 
+"in_zoom", "zoom_raw", tracks=zoom_tracks)
+  backend\app\framing\ffmpeg_builder.py:344:        fc_zoom_fit = _scale_and_fit("zoom_raw", "zoomed", out_w, out_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:345:
+  backend\app\framing\ffmpeg_builder.py:346:        fc = (
+  backend\app\framing\ffmpeg_builder.py:347:            "[v_pts]split=2[in_norm][in_zoom];"
+  backend\app\framing\ffmpeg_builder.py:348:            f"{fc_norm_crop};"
+  backend\app\framing\ffmpeg_builder.py:349:            f"{fc_norm_fit};"
+  backend\app\framing\ffmpeg_builder.py:350:            f"{fc_zoom_crop};"
+  backend\app\framing\ffmpeg_builder.py:351:            f"{fc_zoom_fit};"
+  backend\app\framing\ffmpeg_builder.py:352:            
+"[norm][zoomed]overlay=0:0:enable='gte(mod(t\\,12)\\,6)'[v_framed]"
+  backend\app\framing\ffmpeg_builder.py:353:        )
+  backend\app\framing\ffmpeg_builder.py:396:            p2_enable = "gte(mod(t\\,12)\\,6)"
+  backend\app\framing\ffmpeg_builder.py:397:
+> backend\app\framing\ffmpeg_builder.py:398:        fc_p1_crop = _dynamic_or_safe_crop(p1_box, src_w, src_h, "in_p1", 
+"p1_raw", tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:399:        fc_p1_fit = _scale_and_fit("p1_raw", "p1_full", out_w, out_h, 
+fit_mode=fit_mode)
+> backend\app\framing\ffmpeg_builder.py:400:        fc_p2_crop = _dynamic_or_safe_crop(p2_box, src_w, src_h, "in_p2", 
+"p2_raw", tracks=gameplay_tracks)
+  backend\app\framing\ffmpeg_builder.py:401:        fc_p2_fit = _scale_and_fit("p2_raw", "p2_full", out_w, out_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:402:
+  backend\app\framing\ffmpeg_builder.py:403:        fc = (
+  backend\app\framing\ffmpeg_builder.py:404:            "[v_pts]split=2[in_p1][in_p2];"
+  backend\app\framing\ffmpeg_builder.py:405:            f"{fc_p1_crop};"
+  backend\app\framing\ffmpeg_builder.py:406:            f"{fc_p1_fit};"
+  backend\app\framing\ffmpeg_builder.py:407:            f"{fc_p2_crop};"
+  backend\app\framing\ffmpeg_builder.py:408:            f"{fc_p2_fit};"
+  backend\app\framing\ffmpeg_builder.py:409:            f"[p1_full][p2_full]overlay=0:0:enable='{p2_enable}'[v_framed]"
+  backend\app\framing\ffmpeg_builder.py:410:        )
+  backend\app\framing\ffmpeg_builder.py:411:
+  backend\app\framing\ffmpeg_builder.py:412:    # 
+-----------------------------------------------------------------------
+  backend\app\framing\ffmpeg_builder.py:413:    # 6. SIDE-BY-SIDE BLUR (Dual Portrait Panes over Blurred Background)
+  backend\app\framing\ffmpeg_builder.py:414:    # 
+-----------------------------------------------------------------------
+> backend\app\framing\ffmpeg_builder.py:415:    elif layout == "side_by_side_blur":
+  backend\app\framing\ffmpeg_builder.py:416:        left_w = (out_w // 2) & ~1
+  backend\app\framing\ffmpeg_builder.py:417:        right_w = out_w - left_w
+  backend\app\framing\ffmpeg_builder.py:418:        pane_h = max(2, min(out_h, int(left_w * (16 / 9)) & ~1))
+  backend\app\framing\ffmpeg_builder.py:419:        overlay_y = max(0, (out_h - pane_h) // 2) & ~1
+  backend\app\framing\ffmpeg_builder.py:420:
+  backend\app\framing\ffmpeg_builder.py:421:        p1_box = config.facecam_box or RegionBox(x=0.0, y=0.0, w=0.5, 
+h=1.0)
+  backend\app\framing\ffmpeg_builder.py:422:        p2_box = config.gameplay_box or RegionBox(x=0.5, y=0.0, w=0.5, 
+h=1.0)
+  backend\app\framing\ffmpeg_builder.py:423:
+> backend\app\framing\ffmpeg_builder.py:424:        fc_p1_crop = _dynamic_or_safe_crop(p1_box, src_w, src_h, "in_p1", 
+"p1_raw", tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:425:        fc_p1_fit = _scale_and_fit("p1_raw", "p1_pane", left_w, pane_h, 
+fit_mode=fit_mode)
+> backend\app\framing\ffmpeg_builder.py:426:        fc_p2_crop = _dynamic_or_safe_crop(p2_box, src_w, src_h, "in_p2", 
+"p2_raw", tracks=gameplay_tracks)
+  backend\app\framing\ffmpeg_builder.py:427:        fc_p2_fit = _scale_and_fit("p2_raw", "p2_pane", right_w, pane_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:428:
+  backend\app\framing\ffmpeg_builder.py:429:        fc = (
+  backend\app\framing\ffmpeg_builder.py:430:            "[v_pts]split=3[in_bg][in_p1][in_p2];"
+  backend\app\framing\ffmpeg_builder.py:431:            
+f"[in_bg]scale={out_w}:{out_h}:force_original_aspect_ratio=increase,"
+  backend\app\framing\ffmpeg_builder.py:432:            f"crop={out_w}:{out_h},boxblur=20:2,setsar=1:1[bg_blur];"
+  backend\app\framing\ffmpeg_builder.py:433:            f"{fc_p1_crop};"
+  backend\app\framing\ffmpeg_builder.py:434:            f"{fc_p1_fit};"
+  backend\app\framing\ffmpeg_builder.py:435:            f"{fc_p2_crop};"
+  backend\app\framing\ffmpeg_builder.py:436:            f"{fc_p2_fit};"
+  backend\app\framing\ffmpeg_builder.py:437:            "[p1_pane][p2_pane]hstack=inputs=2[dual_fg];"
+  backend\app\framing\ffmpeg_builder.py:438:            f"[bg_blur][dual_fg]overlay=0:{overlay_y}[v_framed]"
+  backend\app\framing\ffmpeg_builder.py:451:        p2_box = config.gameplay_box or RegionBox(x=0.5, y=0.0, w=0.5, 
+h=1.0)
+  backend\app\framing\ffmpeg_builder.py:452:
+> backend\app\framing\ffmpeg_builder.py:453:        fc_p1_crop = _dynamic_or_safe_crop(p1_box, src_w, src_h, "in_p1", 
+"p1_raw", tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:454:        fc_p1_fit = _scale_and_fit("p1_raw", "p1_pane", left_w, bot_h, 
+fit_mode=fit_mode)
+> backend\app\framing\ffmpeg_builder.py:455:        fc_p2_crop = _dynamic_or_safe_crop(p2_box, src_w, src_h, "in_p2", 
+"p2_raw", tracks=gameplay_tracks)
+  backend\app\framing\ffmpeg_builder.py:456:        fc_p2_fit = _scale_and_fit("p2_raw", "p2_pane", right_w, bot_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:457:
+  backend\app\framing\ffmpeg_builder.py:458:        fc = (
+  backend\app\framing\ffmpeg_builder.py:459:            "[v_pts]split=3[in_wide][in_p1][in_p2];"
+  backend\app\framing\ffmpeg_builder.py:460:            f"[in_wide]setsar=1:1,scale={out_w}:{top_h}:force_original_aspe
+ct_ratio=increase,crop={out_w}:{top_h}:(iw-ow)/2:(ih-oh)/2[wide_top];"
+  backend\app\framing\ffmpeg_builder.py:461:            f"{fc_p1_crop};"
+  backend\app\framing\ffmpeg_builder.py:462:            f"{fc_p1_fit};"
+  backend\app\framing\ffmpeg_builder.py:463:            f"{fc_p2_crop};"
+  backend\app\framing\ffmpeg_builder.py:464:            f"{fc_p2_fit};"
+  backend\app\framing\ffmpeg_builder.py:465:            "[p1_pane][p2_pane]hstack=inputs=2[bot_dual];"
+  backend\app\framing\ffmpeg_builder.py:466:            "[wide_top][bot_dual]vstack=inputs=2[v_framed]"
+  backend\app\framing\ffmpeg_builder.py:467:        )
+  backend\app\framing\ffmpeg_builder.py:477:        if mode == "screen_presenter":
+  backend\app\framing\ffmpeg_builder.py:478:            # Presenter Top, Screen Bottom
+> backend\app\framing\ffmpeg_builder.py:479:            fc_top_crop = _dynamic_or_safe_crop(face_box, src_w, src_h, 
+"in_a", "top_raw", tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:480:            fc_top_fit = _scale_and_fit("top_raw", "top", out_w, top_h, 
+fit_mode=fit_mode)
+> backend\app\framing\ffmpeg_builder.py:481:            fc_bot_crop = _dynamic_or_safe_crop(game_box, src_w, src_h, 
+"in_b", "bot_raw", tracks=gameplay_tracks)
+  backend\app\framing\ffmpeg_builder.py:482:            fc_bot_fit = _scale_and_fit("bot_raw", "bot", out_w, bot_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:483:        else:
+  backend\app\framing\ffmpeg_builder.py:484:            # Region 2 (Gameplay / Video) Top, Region 1 (Face / Reactor) 
+Bottom
+> backend\app\framing\ffmpeg_builder.py:485:            fc_top_crop = _dynamic_or_safe_crop(game_box, src_w, src_h, 
+"in_a", "top_raw", tracks=gameplay_tracks)
+  backend\app\framing\ffmpeg_builder.py:486:            fc_top_fit = _scale_and_fit("top_raw", "top", out_w, top_h, 
+fit_mode=fit_mode)
+> backend\app\framing\ffmpeg_builder.py:487:            fc_bot_crop = _dynamic_or_safe_crop(face_box, src_w, src_h, 
+"in_b", "bot_raw", tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:488:            fc_bot_fit = _scale_and_fit("bot_raw", "bot", out_w, bot_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:489:
+  backend\app\framing\ffmpeg_builder.py:490:        fc = (
+  backend\app\framing\ffmpeg_builder.py:491:            "[v_pts]split=2[in_a][in_b];"
+  backend\app\framing\ffmpeg_builder.py:492:            f"{fc_top_crop};"
+  backend\app\framing\ffmpeg_builder.py:493:            f"{fc_top_fit};"
+  backend\app\framing\ffmpeg_builder.py:494:            f"{fc_bot_crop};"
+  backend\app\framing\ffmpeg_builder.py:495:            f"{fc_bot_fit};"
+  backend\app\framing\ffmpeg_builder.py:496:            "[top][bot]vstack=inputs=2[v_framed]"
+  backend\app\framing\ffmpeg_builder.py:497:        )
+  backend\app\framing\ffmpeg_builder.py:498:
+  backend\app\framing\ffmpeg_builder.py:499:    # 
+-----------------------------------------------------------------------
+  backend\app\framing\ffmpeg_builder.py:507:        if mode == "screen_presenter":
+  backend\app\framing\ffmpeg_builder.py:508:            # Screen Top, Presenter Bottom
+> backend\app\framing\ffmpeg_builder.py:509:            fc_top_crop = _dynamic_or_safe_crop(game_box, src_w, src_h, 
+"in_a", "top_raw", tracks=gameplay_tracks)
+  backend\app\framing\ffmpeg_builder.py:510:            fc_top_fit = _scale_and_fit("top_raw", "top", out_w, top_h, 
+fit_mode=fit_mode)
+> backend\app\framing\ffmpeg_builder.py:511:            fc_bot_crop = _dynamic_or_safe_crop(face_box, src_w, src_h, 
+"in_b", "bot_raw", tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:512:            fc_bot_fit = _scale_and_fit("bot_raw", "bot", out_w, bot_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:513:        else:
+  backend\app\framing\ffmpeg_builder.py:514:            # Region 1 (Facecam / Person 1 / Reactor) Top, Region 2 
+(Gameplay / Person 2 / Video) Bottom
+> backend\app\framing\ffmpeg_builder.py:515:            fc_top_crop = _dynamic_or_safe_crop(face_box, src_w, src_h, 
+"in_a", "top_raw", tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:516:            fc_top_fit = _scale_and_fit("top_raw", "top", out_w, top_h, 
+fit_mode=fit_mode)
+> backend\app\framing\ffmpeg_builder.py:517:            fc_bot_crop = _dynamic_or_safe_crop(game_box, src_w, src_h, 
+"in_b", "bot_raw", tracks=gameplay_tracks)
+  backend\app\framing\ffmpeg_builder.py:518:            fc_bot_fit = _scale_and_fit("bot_raw", "bot", out_w, bot_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:519:
+  backend\app\framing\ffmpeg_builder.py:520:        fc = (
+  backend\app\framing\ffmpeg_builder.py:521:            "[v_pts]split=2[in_a][in_b];"
+  backend\app\framing\ffmpeg_builder.py:522:            f"{fc_top_crop};"
+  backend\app\framing\ffmpeg_builder.py:523:            f"{fc_top_fit};"
+  backend\app\framing\ffmpeg_builder.py:524:            f"{fc_bot_crop};"
+  backend\app\framing\ffmpeg_builder.py:525:            f"{fc_bot_fit};"
+  backend\app\framing\ffmpeg_builder.py:526:            "[top][bot]vstack=inputs=2[v_framed]"
+  backend\app\framing\ffmpeg_builder.py:527:        )
+  backend\app\framing\ffmpeg_builder.py:528:
+  backend\app\framing\ffmpeg_builder.py:529:    # 
+-----------------------------------------------------------------------
+  backend\app\framing\ffmpeg_builder.py:534:        top_h = max(2, min(out_h - 2, int(out_h * split / 100) & ~1))
+  backend\app\framing\ffmpeg_builder.py:535:        bot_h = out_h - top_h
+> backend\app\framing\ffmpeg_builder.py:536:        fc_top_crop = _dynamic_or_safe_crop(face_box, src_w, src_h, 
+"in_a", "top_raw", tracks=facecam_tracks)
+  backend\app\framing\ffmpeg_builder.py:537:        fc_top_fit = _scale_and_fit("top_raw", "top", out_w, top_h, 
+fit_mode=fit_mode)
+> backend\app\framing\ffmpeg_builder.py:538:        fc_bot_crop = _dynamic_or_safe_crop(game_box, src_w, src_h, 
+"in_b", "bot_raw", tracks=gameplay_tracks)
+  backend\app\framing\ffmpeg_builder.py:539:        fc_bot_fit = _scale_and_fit("bot_raw", "bot", out_w, bot_h, 
+fit_mode=fit_mode)
+  backend\app\framing\ffmpeg_builder.py:540:        fc = (
+  backend\app\framing\ffmpeg_builder.py:541:            "[v_pts]split=2[in_a][in_b];"
+  backend\app\framing\ffmpeg_builder.py:542:            f"{fc_top_crop};"
+  backend\app\framing\ffmpeg_builder.py:543:            f"{fc_top_fit};"
+  backend\app\framing\ffmpeg_builder.py:544:            f"{fc_bot_crop};"
+  backend\app\framing\ffmpeg_builder.py:545:            f"{fc_bot_fit};"
+  backend\app\framing\ffmpeg_builder.py:546:            "[top][bot]vstack=inputs=2[v_framed]"
+  backend\app\framing\ffmpeg_builder.py:547:        )
+  backend\app\framing\ffmpeg_builder.py:548:
+  backend\app\framing\ffmpeg_builder.py:549:    fc = f"[0:v]setpts=PTS-STARTPTS[v_pts];{fc}"
+  backend\app\framing\ffmpeg_builder.py:550:
+  backend\app\framing\ffmpeg_builder.py:635:    speaker_tracks: list[dict] | None = None,
+  backend\app\framing\ffmpeg_builder.py:636:    ass_path: str | None = None,
+> backend\app\framing\ffmpeg_builder.py:637:    facecam_tracks: list[dict] | None = None,
+> backend\app\framing\ffmpeg_builder.py:638:    gameplay_tracks: list[dict] | None = None,
+  backend\app\framing\ffmpeg_builder.py:639:    watermark_input_index: int = 1,
+  backend\app\framing\ffmpeg_builder.py:640:) -> list[str]:
+  backend\app\framing\ffmpeg_builder.py:641:    """
+  backend\app\framing\ffmpeg_builder.py:642:    Assemble a complete FFmpeg command for rendering a clip.
+  backend\app\framing\ffmpeg_builder.py:643:
+  backend\app\framing\ffmpeg_builder.py:644:    Key invariants:
+  backend\app\framing\ffmpeg_builder.py:645:      - Input seeking (-ss before -i) for fast seek to start_sec
+  backend\app\framing\ffmpeg_builder.py:646:      - -t specifies clip duration
+  backend\app\framing\ffmpeg_builder.py:647:      - -fps_mode cfr on OUTPUT side enforces CFR (VFR-to-CFR sync 
+protection)
+  backend\app\framing\ffmpeg_builder.py:648:      - [vout] from filter_complex is mapped to output
+  backend\app\framing\ffmpeg_builder.py:649:      - Audio copied from input 0:a
+  backend\app\framing\ffmpeg_builder.py:650:      - -movflags +faststart
+  backend\app\framing\ffmpeg_builder.py:660:        speaker_tracks=speaker_tracks,
+  backend\app\framing\ffmpeg_builder.py:661:        ass_path=ass_path,
+> backend\app\framing\ffmpeg_builder.py:662:        facecam_tracks=facecam_tracks,
+> backend\app\framing\ffmpeg_builder.py:663:        gameplay_tracks=gameplay_tracks,
+  backend\app\framing\ffmpeg_builder.py:664:        watermark_input_index=watermark_input_index,
+  backend\app\framing\ffmpeg_builder.py:665:    )
+  backend\app\framing\ffmpeg_builder.py:666:
+  backend\app\framing\ffmpeg_builder.py:667:    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
+  backend\app\framing\ffmpeg_builder.py:668:    duration = end_sec - start_sec
+  backend\app\framing\ffmpeg_builder.py:669:
+  backend\app\framing\ffmpeg_builder.py:670:    video_map = "[v_final]" if "[v_final]" in fc_str else "[vout]"
+  backend\app\framing\ffmpeg_builder.py:671:    cmd = [
+  backend\app\framing\ffmpeg_builder.py:672:        ffmpeg_bin,
+  backend\app\framing\ffmpeg_builder.py:673:        "-y",
+  backend\app\framing\ffmpeg_builder.py:674:        "-ss", str(start_sec),   # input-seek (fast keyframe seek)
+  backend\app\framing\ffmpeg_builder.py:675:        "-i", input_path,
+  backend\app\framing\ffmpeg_builder.py:708:    speaker_tracks: list[dict] | None = None,
+  backend\app\framing\ffmpeg_builder.py:709:    ass_path: str | None = None,
+> backend\app\framing\ffmpeg_builder.py:710:    facecam_tracks: list[dict] | None = None,
+  backend\app\framing\ffmpeg_builder.py:711:) -> tuple[str, str]:
+  backend\app\framing\ffmpeg_builder.py:712:    """
+  backend\app\framing\ffmpeg_builder.py:713:    Try h264_nvenc first; on failure re-run with libx264.
+  backend\app\framing\ffmpeg_builder.py:714:
+  backend\app\framing\ffmpeg_builder.py:715:    Returns:
+  backend\app\framing\ffmpeg_builder.py:716:        (encoder_used, stderr_output)
+  backend\app\framing\ffmpeg_builder.py:717:    """
+  backend\app\framing\ffmpeg_builder.py:718:    run_cwd = None
+  backend\app\framing\ffmpeg_builder.py:719:    cmd_ass_path = ass_path
+  backend\app\framing\ffmpeg_builder.py:720:    if ass_path and Path(ass_path).is_file():
+  backend\app\framing\ffmpeg_builder.py:721:        ass_p = Path(ass_path)
+  backend\app\framing\ffmpeg_builder.py:722:        run_cwd = str(ass_p.parent)
+  backend\app\framing\ffmpeg_builder.py:727:        cmd = build_ffmpeg_cmd(
+  backend\app\framing\ffmpeg_builder.py:728:            input_path, output_path, config, src_w, src_h, start_sec, 
+end_sec, encoder,
+> backend\app\framing\ffmpeg_builder.py:729:            speaker_tracks=speaker_tracks, ass_path=cmd_ass_path, 
+facecam_tracks=facecam_tracks,
+  backend\app\framing\ffmpeg_builder.py:730:        )
+  backend\app\framing\ffmpeg_builder.py:731:        result = subprocess.run(
+  backend\app\framing\ffmpeg_builder.py:732:            cmd,
+  backend\app\framing\ffmpeg_builder.py:733:            stdout=subprocess.PIPE,
+  backend\app\framing\ffmpeg_builder.py:734:            stderr=subprocess.PIPE,
+  backend\app\framing\ffmpeg_builder.py:735:            timeout=timeout,
+  backend\app\framing\ffmpeg_builder.py:736:            cwd=run_cwd,
+  backend\app\framing\ffmpeg_builder.py:737:        )
+  backend\app\framing\ffmpeg_builder.py:738:        if result.returncode == 0:
+  backend\app\framing\ffmpeg_builder.py:739:            return encoder, result.stderr.decode("utf-8", errors="ignore")
+  backend\app\framing\ffmpeg_builder.py:740:
+  backend\app\framing\ffmpeg_builder.py:741:    err_msg = result.stderr.decode("utf-8", errors="ignore")[-1200:] if 
+result else "unknown error"
+
+
+

@@ -80,84 +80,66 @@ def build_export_filter_graph(
     """
     Build trimming and concatenation filtergraph before applying the framing filter graph.
 
-    For multi-segment clips (len(segments) > 1), each segment has its own fast-seeked input stream [k:v] / [k:a].
-    For single clips, trims from [0:v] / [0:a].
+    For multi-segment clips and single-segment clips, each segment has its own fast-seeked input stream [k:v] / [k:a].
     PTS is normalized, 20ms afade edges prevent audio clicks, and streams concat into [srcv] & [srca_raw].
     """
     multi_segments = [s for s in (segments or []) if s[1] > s[0]][:8]
+    effective_segments = multi_segments if multi_segments else ([(start_sec, end_sec)] if end_sec > start_sec else [(0.0, 1.0)])
+    all_kept = kept_intervals or effective_segments
+
     parts: list[str] = []
     video_labels: list[str] = []
     audio_labels: list[str] = []
 
-    if len(multi_segments) > 1:
-        # Fast multi-input mode: input k corresponds to segment k
-        all_kept = kept_intervals or multi_segments
-        for k, (seg_start, seg_end) in enumerate(multi_segments):
-            seg_dur = max(0.01, seg_end - seg_start)
-            sub_intervals = [
-                (max(seg_start, it[0]), min(seg_end, it[1]))
-                for it in all_kept
-                if it[1] > seg_start and it[0] < seg_end
-            ]
-            if not sub_intervals:
-                sub_intervals = [(seg_start, seg_end)]
+    for k, (seg_start, seg_end) in enumerate(effective_segments):
+        seg_dur = max(0.01, seg_end - seg_start)
+        sub_intervals = [
+            (max(seg_start, it[0]), min(seg_end, it[1]))
+            for it in all_kept
+            if it[1] > seg_start and it[0] < seg_end
+        ]
+        if not sub_intervals:
+            sub_intervals = [(seg_start, seg_end)]
 
-            is_full_segment = (
-                len(sub_intervals) == 1
-                and abs(sub_intervals[0][0] - seg_start) < 0.05
-                and abs(sub_intervals[0][1] - seg_end) < 0.05
-            )
+        is_full_segment = (
+            len(sub_intervals) == 1
+            and abs(sub_intervals[0][0] - seg_start) < 0.05
+            and abs(sub_intervals[0][1] - seg_end) < 0.05
+        )
 
-            if is_full_segment:
-                v_lbl = f"vseg{k}"
-                parts.append(f"[{k}:v]setpts=PTS-STARTPTS[{v_lbl}]")
+        if is_full_segment:
+            v_lbl = f"vseg{k}"
+            parts.append(f"[{k}:v]setpts=PTS-STARTPTS[{v_lbl}]")
+            video_labels.append(f"[{v_lbl}]")
+
+            if has_audio:
+                a_lbl = f"aseg{k}"
+                fade_str = ""
+                if seg_dur > 0.15:
+                    fade_out_st = round(seg_dur - 0.02, 3)
+                    fade_str = f",afade=t=in:st=0:d=0.020,afade=t=out:st={fade_out_st:.3f}:d=0.020"
+                parts.append(f"[{k}:a:0]asetpts=PTS-STARTPTS{fade_str}[{a_lbl}]")
+                audio_labels.append(f"[{a_lbl}]")
+        else:
+            for j, (sub_s, sub_e) in enumerate(sub_intervals):
+                rel_s = max(0.0, sub_s - seg_start)
+                rel_e = min(seg_dur, sub_e - seg_start)
+                sub_dur = max(0.001, rel_e - rel_s)
+
+                v_lbl = f"vseg{k}_{j}"
+                parts.append(f"[{k}:v]trim=start={rel_s:.6f}:end={rel_e:.6f},setpts=PTS-STARTPTS[{v_lbl}]")
                 video_labels.append(f"[{v_lbl}]")
 
                 if has_audio:
-                    a_lbl = f"aseg{k}"
-                    fade_out_st = max(0.0, seg_dur - 0.02)
-                    fade_d = min(0.02, seg_dur / 2.0)
+                    a_lbl = f"aseg{k}_{j}"
+                    fade_str = ""
+                    if sub_dur > 0.15:
+                        fade_out_st = round(sub_dur - 0.02, 3)
+                        fade_str = f",afade=t=in:st=0:d=0.020,afade=t=out:st={fade_out_st:.3f}:d=0.020"
                     parts.append(
-                        f"[{k}:a]asetpts=PTS-STARTPTS,"
-                        f"afade=t=in:st=0:d={fade_d:.3f},"
-                        f"afade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}[{a_lbl}]"
+                        f"[{k}:a:0]atrim=start={rel_s:.6f}:end={rel_e:.6f},asetpts=PTS-STARTPTS{fade_str}[{a_lbl}]"
                     )
                     audio_labels.append(f"[{a_lbl}]")
-            else:
-                for j, (sub_s, sub_e) in enumerate(sub_intervals):
-                    rel_s = max(0.0, sub_s - seg_start)
-                    rel_e = min(seg_dur, sub_e - seg_start)
-                    sub_dur = max(0.001, rel_e - rel_s)
-
-                    v_lbl = f"vseg{k}_{j}"
-                    parts.append(f"[{k}:v]trim=start={rel_s:.6f}:end={rel_e:.6f},setpts=PTS-STARTPTS[{v_lbl}]")
-                    video_labels.append(f"[{v_lbl}]")
-
-                    if has_audio:
-                        a_lbl = f"aseg{k}_{j}"
-                        fade_out_st = max(0.0, sub_dur - 0.02)
-                        fade_d = min(0.02, sub_dur / 2.0)
-                        parts.append(
-                            f"[{k}:a]atrim=start={rel_s:.6f}:end={rel_e:.6f},asetpts=PTS-STARTPTS,"
-                            f"afade=t=in:st=0:d={fade_d:.3f},"
-                            f"afade=t=out:st={fade_out_st:.3f}:d={fade_d:.3f}[{a_lbl}]"
-                        )
-                        audio_labels.append(f"[{a_lbl}]")
-    else:
-        # Single-input mode: trims intervals from [0:v] and [0:a]
-        intervals = kept_intervals or [(start_sec, end_sec)]
-        for index, (s, e) in enumerate(intervals):
-            video_label = f"vseg{index}"
-            parts.append(
-                f"[0:v]trim=start={s:.6f}:end={e:.6f},setpts=PTS-STARTPTS[{video_label}]"
-            )
-            video_labels.append(f"[{video_label}]")
-            if has_audio:
-                audio_label = f"aseg{index}"
-                parts.append(
-                    f"[0:a]atrim=start={s:.6f}:end={e:.6f},asetpts=PTS-STARTPTS[{audio_label}]"
-                )
-                audio_labels.append(f"[{audio_label}]")
 
     num_pieces = len(video_labels)
     if num_pieces == 1:
@@ -193,7 +175,8 @@ def build_export_command(
 ) -> list[str]:
     """Build a CFR export command with fast input seeking per segment and optional watermark stream."""
     multi_segments = [s for s in (segments or []) if s[1] > s[0]][:8]
-    all_kept = kept_intervals or (multi_segments if multi_segments else [(start_sec, end_sec)])
+    effective_segments = multi_segments if multi_segments else ([(start_sec, end_sec)] if end_sec > start_sec else [(0.0, 1.0)])
+    all_kept = kept_intervals or effective_segments
 
     graph = build_export_filter_graph(
         framing_filter=framing_filter,
@@ -202,23 +185,17 @@ def build_export_command(
         kept_intervals=all_kept,
         normalize=normalize,
         has_audio=has_audio,
-        segments=multi_segments,
+        segments=effective_segments,
     )
     ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
     command = [ffmpeg, "-hide_banner", "-y"]
 
-    if len(multi_segments) > 1:
-        # Fast Seeking: One input per segment with -ss <start> -t <duration> -i <source>
-        for seg_start, seg_end in multi_segments:
-            seg_dur = max(0.01, seg_end - seg_start)
-            command += ["-ss", f"{seg_start:.6f}", "-t", f"{seg_dur:.6f}", "-i", input_path]
-    else:
-        # Single-input seek
-        if start_sec > 0:
-            command += ["-ss", f"{start_sec:.6f}", "-copyts", "-start_at_zero"]
-        command += ["-i", input_path]
+    # Fast Seeking: One input per segment with -ss <start> -t <duration> -i <source>
+    for seg_start, seg_end in effective_segments:
+        seg_dur = max(0.01, seg_end - seg_start)
+        command += ["-ss", f"{seg_start:.6f}", "-t", f"{seg_dur:.6f}", "-i", input_path]
 
-    # Watermark input is added AFTER all segment inputs (input index = len(multi_segments) or 1)
+    # Watermark input is added AFTER all segment inputs (input index = len(effective_segments))
     if watermark_path and Path(watermark_path).is_file():
         command += ["-i", watermark_path]
 
@@ -226,7 +203,8 @@ def build_export_command(
     video_map = "[v_final]" if "[v_final]" in graph else "[vout]"
     command += ["-t", f"{output_duration:.6f}", "-filter_complex", graph, "-map", video_map]
     if has_audio:
-        command += ["-map", "[aout]", "-c:a", "aac", "-b:a", "192k"]
+        audio_map = "[aout]" if "[aout]" in graph else "0:a:0?"
+        command += ["-map", audio_map, "-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
     else:
         command += ["-an"]
     command += ["-fps_mode", "cfr", "-sn", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats"]

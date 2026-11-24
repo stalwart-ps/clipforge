@@ -28,12 +28,29 @@ router = APIRouter(prefix="/api", tags=["captions"])
 
 
 def _system_fonts() -> list[str]:
+    backend_fonts = Path(__file__).resolve().parent.parent.parent / "assets" / "fonts"
     candidates = [
+        backend_fonts,
         Path(os.environ.get("WINDIR", "C:/Windows")) / "Fonts",
-        Path.home() / ".fonts", Path.home() / ".local/share/fonts",
-        Path("/usr/share/fonts"), Path("/System/Library/Fonts"), Path("/Library/Fonts"),
+        Path.home() / ".fonts",
+        Path.home() / ".local/share/fonts",
+        Path("/usr/share/fonts"),
+        Path("/System/Library/Fonts"),
+        Path("/Library/Fonts"),
     ]
-    names: set[str] = {"Arial", "Arial Black", "DejaVu Sans"}
+    names: set[str] = {
+        "Arial",
+        "Arial Black",
+        "Impact",
+        "Bahnschrift",
+        "Segoe UI",
+        "Georgia",
+        "Trebuchet MS",
+        "Consolas",
+        "Times New Roman",
+        "Verdana",
+        "DejaVu Sans",
+    }
     for folder in candidates:
         if folder.is_dir():
             for pattern in ("*.ttf", "*.otf", "*.ttc"):

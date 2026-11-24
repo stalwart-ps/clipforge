@@ -15,6 +15,9 @@ async def auto_detect_regions(
     time_sec: float = 5.0,
     framing_mode: str = "gaming",
     tightness: str = "medium",
+    layout_template: str = "split_vertical",
+    aspect_ratio: str = "9:16",
+    split_ratio: int = 50,
 ) -> AutoDetectResult:
     """
     Runs the vision_worker subprocess and returns an AutoDetectResult.
@@ -32,6 +35,9 @@ async def auto_detect_regions(
         "--time-sec", str(time_sec),
         "--framing-mode", framing_mode,
         "--tightness", tightness,
+        "--layout-template", layout_template,
+        "--aspect-ratio", aspect_ratio,
+        "--split-ratio", str(split_ratio),
         "--output-json", str(output_json),
     ]
 
@@ -124,11 +130,12 @@ async def track_facecam_overlay(
     start_sec: float,
     end_sec: float,
     facecam_box: dict | RegionBox,
+    framing_mode: str = "gaming",
 ) -> list[dict]:
     """Run dynamic facecam tracking in the isolated vision worker subprocess."""
     box_dict = facecam_box.model_dump() if hasattr(facecam_box, "model_dump") else dict(facecam_box)
     worker_script = settings.backend_dir / "workers" / "vision_worker.py"
-    output_json = settings.temp_dir / f"facecam_{abs(hash((video_path, start_sec, end_sec)))}.json"
+    output_json = settings.temp_dir / f"facecam_{abs(hash((video_path, start_sec, end_sec, json.dumps(box_dict), framing_mode)))}.json"
     cmd = [
         sys.executable,
         str(worker_script),
@@ -141,6 +148,8 @@ async def track_facecam_overlay(
         str(end_sec),
         "--facecam-box",
         json.dumps(box_dict),
+        "--framing-mode",
+        framing_mode,
         "--output-json",
         str(output_json),
     ]

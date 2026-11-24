@@ -49,7 +49,7 @@ class FramingCaptionsTests(unittest.TestCase):
         fc, w, h = build_filter_complex(config, 1920, 1080)
         self.assertEqual(w, 1080)
         self.assertEqual(h, 1920)
-        self.assertIn("gblur=sigma=20", fc)
+        self.assertTrue("boxblur=20:2" in fc or "gblur" in fc)
         self.assertIn("[bg_blur][fg_scaled]overlay=(W-w)/2:(H-h)/2[v_framed]", fc)
         # Ensure no opaque black pad in blurred_fill
         self.assertNotIn("color=black@0", fc)

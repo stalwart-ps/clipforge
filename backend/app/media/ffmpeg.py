@@ -5,16 +5,22 @@ import shutil
 import subprocess
 
 
-def _run_sync(cmd: list[str], timeout: float = 30.0) -> tuple[int, str]:
+def _run_sync(cmd: list[str], timeout: float = 30.0, combine_stderr: bool = True) -> tuple[int, str]:
     try:
         proc = subprocess.run(
             cmd,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            encoding="utf-8",
+            errors="replace",
             timeout=timeout,
         )
-        return proc.returncode, proc.stdout + ("\n" + proc.stderr if proc.stderr else "")
+        out = proc.stdout or ""
+        err = proc.stderr or ""
+        if combine_stderr:
+            return proc.returncode, out + ("\n" + err if err else "")
+        return proc.returncode, out
     except Exception as e:
         return -1, str(e)
 
@@ -33,7 +39,7 @@ class FFmpegHelper:
             "-show_streams",
             str(file_path),
         ]
-        rc, out = await asyncio.to_thread(_run_sync, cmd, 15.0)
+        rc, out = await asyncio.to_thread(_run_sync, cmd, 15.0, combine_stderr=False)
         if rc != 0:
             return {}
 

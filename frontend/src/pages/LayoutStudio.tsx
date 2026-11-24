@@ -243,6 +243,8 @@ export const LayoutStudio: React.FC = () => {
   const [dynamicFacecamTracking, setDynamicFacecamTracking] = useState<boolean>(false);
   const [paneFitMode, setPaneFitMode] = useState<PaneFitMode>('fill');
   const [tightness, setTightness] = useState<'close' | 'medium' | 'wide'>('medium');
+  const [punchInZoomed, setPunchInZoomed] = useState<boolean>(true);
+  const [activeSpeakerHost, setActiveSpeakerHost] = useState<'p1' | 'p2'>('p1');
   const currentMeta = useMemo(() => MODE_METAS[framingMode] || MODE_METAS.gaming, [framingMode]);
 
   // ── Safe-zone overlay ─────────────────────────────────────────────────────
@@ -544,15 +546,18 @@ export const LayoutStudio: React.FC = () => {
       const sh = Math.max(1, box.h * image.naturalHeight);
 
       if (paneFitMode === 'fill') {
-        // object-cover: scale to cover dw:dh without black bars, center cropped
+        // object-cover: scale to cover dw:dh without black bars
         const scale = Math.max(dw / sw, dh / sh);
         const rw = sw * scale;
         const rh = sh * scale;
+        // Head-Safe Vertical Fill Bias: whenever rh > dh (vertical crop), bias crop toward upper area (y = (dh - rh) * 0.2)
+        const xOffset = (dw - rw) / 2;
+        const yOffset = rh > dh ? (dh - rh) * 0.2 : (dh - rh) / 2;
         ctx.save();
         ctx.beginPath();
         ctx.rect(dx, dy, dw, dh);
         ctx.clip();
-        ctx.drawImage(image, sx, sy, sw, sh, dx + (dw - rw) / 2, dy + (dh - rh) / 2, rw, rh);
+        ctx.drawImage(image, sx, sy, sw, sh, dx + xOffset, dy + yOffset, rw, rh);
         ctx.restore();
       } else {
         // object-contain: scale to fit inside dw:dh, padded with black
@@ -625,18 +630,122 @@ export const LayoutStudio: React.FC = () => {
       const pipBox = facecamBox ?? { x: 0, y: 0, w: 0.3, h: 0.25 };
       drawRegion(mainBox, 0, 0, W, H);
 
-      const pipW = Math.round(W * 0.32);
-      const pipH = Math.round(pipW * (pipBox.h / pipBox.w));
-      const pipX = W - pipW - 10;
-      const pipY = 10;
-      ctx.fillStyle = 'rgba(0,0,0,0.4)';
-      ctx.fillRect(pipX - 2, pipY - 2, pipW + 4, pipH + 4);
+      const pipW = Math.round(W * 0.33);
+      const boxAspect = (pipBox.w * image.naturalWidth) / Math.max(1, pipBox.h * image.naturalHeight);
+      const pipH = Math.round(pipW / (boxAspect || 1.333));
+      const pipX = W - pipW - 12;
+      const pipY = 12;
+
+      ctx.save();
+      ctx.shadowColor = 'rgba(0,0,0,0.6)';
+      ctx.shadowBlur = 8;
+      ctx.fillStyle = 'rgba(0,0,0,0.5)';
+      ctx.beginPath();
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(pipX, pipY, pipW, pipH, 8);
+      } else {
+        ctx.rect(pipX, pipY, pipW, pipH);
+      }
+      ctx.fill();
+      ctx.restore();
+
+      ctx.save();
+      ctx.beginPath();
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(pipX, pipY, pipW, pipH, 8);
+      } else {
+        ctx.rect(pipX, pipY, pipW, pipH);
+      }
+      ctx.clip();
       drawRegion(pipBox, pipX, pipY, pipW, pipH);
-      ctx.strokeStyle = 'rgba(255,100,220,0.9)';
-      ctx.lineWidth = 1.5;
-      ctx.strokeRect(pipX, pipY, pipW, pipH);
+      ctx.restore();
+
+      ctx.save();
+      ctx.strokeStyle = 'rgba(255,255,255,0.85)';
+      ctx.lineWidth = 2;
+      ctx.beginPath();
+      if (typeof ctx.roundRect === 'function') {
+        ctx.roundRect(pipX, pipY, pipW, pipH, 8);
+      } else {
+        ctx.rect(pipX, pipY, pipW, pipH);
+      }
+      ctx.stroke();
+      ctx.restore();
+    } else if (layoutTemplate === 'blurred_fill') {
+      // Full-canvas blurred source video background (filter: blur(16px))
+      ctx.save();
+      ctx.filter = 'blur(16px)';
+      const bgScale = Math.max(W / image.naturalWidth, H / image.naturalHeight);
+      const bgW = image.naturalWidth * bgScale;
+      const bgH = image.naturalHeight * bgScale;
+      ctx.drawImage(image, (W - bgW) / 2, (H - bgH) / 2, bgW, bgH);
+      ctx.restore();
+
+      // Sharp centered foreground (in Gaming/Screen/Reaction use gameplay_box / full 16:9 frame; in Talking Head/Podcast use facecam_box / full frame)
+      const fgBox = (framingMode === 'talking_head' || framingMode === 'podcast')
+        ? (facecamBox ?? { x: 0, y: 0, w: 1, h: 1 })
+        : (gameplayBox ?? { x: 0, y: 0, w: 1, h: 1 });
+
+      const sx = fgBox.x * image.naturalWidth;
+      const sy = fgBox.y * image.naturalHeight;
+      const sw = Math.max(1, fgBox.w * image.naturalWidth);
+      const sh = Math.max(1, fgBox.h * image.naturalHeight);
+      const fgScale = Math.min(W / sw, H / sh);
+      const rw = sw * fgScale;
+      const rh = sh * fgScale;
+      ctx.drawImage(image, sx, sy, sw, sh, (W - rw) / 2, (H - rh) / 2, rw, rh);
+    } else if (layoutTemplate === 'fullscreen_crop') {
+      // gameplay_box for Gaming/Screen, facecam_box for Talking Head/Podcast/Reaction
+      const cropBox = (framingMode === 'talking_head' || framingMode === 'podcast' || framingMode === 'reaction')
+        ? (facecamBox ?? gameplayBox ?? { x: 0, y: 0, w: 1, h: 1 })
+        : (gameplayBox ?? facecamBox ?? { x: 0, y: 0, w: 1, h: 1 });
+      drawRegion(cropBox, 0, 0, W, H);
+    } else if (layoutTemplate === 'punch_in_zoom') {
+      const spk = facecamBox ?? gameplayBox ?? { x: 0, y: 0, w: 1, h: 1 };
+      if (punchInZoomed) {
+        // Distinct 112% punch-in framing centered on speaker
+        const zw = spk.w / 1.12;
+        const zh = spk.h / 1.12;
+        const zx = Math.max(0, Math.min(1 - zw, spk.x + (spk.w - zw) / 2));
+        const zy = Math.max(0, Math.min(1 - zh, spk.y + (spk.h - zh) / 2));
+        drawRegion({ x: zx, y: zy, w: zw, h: zh }, 0, 0, W, H);
+      } else {
+        drawRegion(spk, 0, 0, W, H);
+      }
+
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(8, 8, 230, 24);
+      ctx.strokeStyle = punchInZoomed ? '#a855f7' : 'rgba(255,255,255,0.3)';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(8, 8, 230, 24);
+      ctx.fillStyle = punchInZoomed ? '#c084fc' : '#94a3b8';
+      ctx.font = 'bold 10px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(
+        `⚡ Auto Punch-In (${punchInZoomed ? '112% Zoom' : '100% Base'})`,
+        14,
+        24
+      );
+    } else if (layoutTemplate === 'podcast_active_speaker') {
+      const spk = (activeSpeakerHost === 'p2' && gameplayBox)
+        ? gameplayBox
+        : (facecamBox ?? { x: 0.1, y: 0.15, w: 0.38, h: 0.65 });
+      drawRegion(spk, 0, 0, W, H);
+
+      ctx.fillStyle = 'rgba(0,0,0,0.75)';
+      ctx.fillRect(8, 8, 230, 24);
+      ctx.strokeStyle = '#38bdf8';
+      ctx.lineWidth = 1;
+      ctx.strokeRect(8, 8, 230, 24);
+      ctx.fillStyle = '#38bdf8';
+      ctx.font = 'bold 10px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText(
+        `🎙️ Active Speaker (${activeSpeakerHost === 'p1' ? 'Person 1' : 'Person 2'})`,
+        14,
+        24
+      );
     } else if (layoutTemplate === 'side_by_side_blur') {
-      // Blurred background fills canvas
       ctx.save();
       ctx.filter = 'blur(16px)';
       const bgScale = Math.max(W / image.naturalWidth, H / image.naturalHeight);
@@ -663,59 +772,49 @@ export const LayoutStudio: React.FC = () => {
       ctx.lineTo(leftW, paneY + paneH);
       ctx.stroke();
     } else if (layoutTemplate === 'wide_plus_dual') {
-      const topH = Math.round(H * 0.40);
+      // 9:16 (1080x1920) geometry: Top ~36% (690px), Bottom ~64% (1230px)
+      const topH = Math.round(H * (690 / 1920));
       const botH = H - topH;
       const leftW = Math.round(W / 2);
       const rightW = W - leftW;
 
-      const wideBox = gameplayBox ?? { x: 0, y: 0, w: 1, h: 1 };
-      const p1 = facecamBox ?? { x: 0, y: 0, w: 0.5, h: 1 };
-      const p2 = gameplayBox ?? { x: 0.5, y: 0, w: 0.5, h: 1 };
+      // Top pane: full uncropped 16:9 wide source frame (scaled cleanly to W wide, filled/clean-cropped symmetrically)
+      const sw = image.naturalWidth;
+      const sh = image.naturalHeight;
+      const topScale = Math.max(W / sw, topH / sh);
+      const rw = sw * topScale;
+      const rh = sh * topScale;
+      ctx.save();
+      ctx.beginPath();
+      ctx.rect(0, 0, W, topH);
+      ctx.clip();
+      ctx.drawImage(image, 0, 0, sw, sh, (W - rw) / 2, (topH - rh) / 2, rw, rh);
+      ctx.restore();
 
-      drawRegion(wideBox, 0, 0, W, topH);
+      // Bottom pane: two equal side-by-side portrait panes (Person 1 left, Person 2 right)
+      const p1 = facecamBox ?? { x: 0.0, y: 0.0, w: 0.5, h: 1.0 };
+      const p2 = gameplayBox ?? { x: 0.5, y: 0.0, w: 0.5, h: 1.0 };
       drawRegion(p1, 0, topH, leftW, botH);
       drawRegion(p2, leftW, topH, rightW, botH);
 
+      // Dividers
       ctx.strokeStyle = 'rgba(255,255,255,0.5)';
-      ctx.lineWidth = 1;
+      ctx.lineWidth = 1.5;
       ctx.beginPath();
       ctx.moveTo(0, topH); ctx.lineTo(W, topH);
       ctx.moveTo(leftW, topH); ctx.lineTo(leftW, H);
       ctx.stroke();
-    } else if (layoutTemplate === 'podcast_active_speaker') {
-      const p1 = facecamBox ?? gameplayBox ?? { x: 0, y: 0, w: 1, h: 1 };
-      drawRegion(p1, 0, 0, W, H);
 
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(8, 8, 180, 22);
-      ctx.fillStyle = '#38bdf8';
-      ctx.font = 'bold 10px monospace';
-      ctx.fillText('🎙️ Active Speaker (Auto-Cut)', 14, 23);
-    } else if (layoutTemplate === 'punch_in_zoom') {
-      const spk = facecamBox ?? gameplayBox ?? { x: 0, y: 0, w: 1, h: 1 };
-      drawRegion(spk, 0, 0, W, H);
-
-      ctx.fillStyle = 'rgba(0,0,0,0.7)';
-      ctx.fillRect(8, 8, 190, 22);
-      ctx.fillStyle = '#a855f7';
-      ctx.font = 'bold 10px monospace';
-      ctx.fillText('⚡ Punch-In Zoom Cuts (110%)', 14, 23);
-    } else if (layoutTemplate === 'blurred_fill') {
-      // Blurred background fills/covers the canvas
-      ctx.save();
-      ctx.filter = 'blur(16px)';
-      const bgScale = Math.max(W / image.naturalWidth, H / image.naturalHeight);
-      const bgW = image.naturalWidth * bgScale;
-      const bgH = image.naturalHeight * bgScale;
-      ctx.drawImage(image, (W - bgW) / 2, (H - bgH) / 2, bgW, bgH);
-      ctx.restore();
-
-      // Sharp foreground overlaid ON TOP
-      const fgBox = gameplayBox ?? facecamBox ?? { x: 0, y: 0, w: 1, h: 1 };
-      drawRegion(fgBox, 0, 0, W, H);
+      // Top pane label
+      ctx.fillStyle = 'rgba(0,0,0,0.6)';
+      ctx.fillRect(6, 6, 120, 16);
+      ctx.fillStyle = 'rgba(255,255,255,0.9)';
+      ctx.font = '9px monospace';
+      ctx.textAlign = 'left';
+      ctx.fillText('Overview Wide (16:9)', 10, 18);
     } else {
-      // Fullscreen crop
-      const cropBox = (framingMode === 'talking_head' || framingMode === 'podcast')
+      // Fullscreen crop fallback
+      const cropBox = (framingMode === 'talking_head' || framingMode === 'podcast' || framingMode === 'reaction')
         ? (facecamBox ?? gameplayBox ?? { x: 0, y: 0, w: 1, h: 1 })
         : (gameplayBox ?? facecamBox ?? { x: 0, y: 0, w: 1, h: 1 });
       drawRegion(cropBox, 0, 0, W, H);
@@ -741,7 +840,7 @@ export const LayoutStudio: React.FC = () => {
       const logo = new Image();
       logo.onload = () => {
         const logoW = W * watermarkScale;
-        const logoH = logoW * logo.height / logo.width;
+        const logoH = (logoW * logo.height) / logo.width;
         const x = watermarkCorner.endsWith('right') ? W - logoW - 8 : 8;
         const y = watermarkCorner.startsWith('bottom') ? H - logoH - 8 : 8;
         ctx.globalAlpha = watermarkOpacity;
@@ -764,6 +863,8 @@ export const LayoutStudio: React.FC = () => {
     watermarkScale,
     watermarkOpacity,
     watermarkCorner,
+    punchInZoomed,
+    activeSpeakerHost,
   ]);
 
   useEffect(() => {
@@ -901,7 +1002,15 @@ export const LayoutStudio: React.FC = () => {
     setIsDetecting(true);
     setDetectResult(null);
     try {
-      const result = await api.autoDetectRegions(activeProject.id, frameSec, framingMode, tightness);
+      const result = await api.autoDetectRegions(
+        activeProject.id,
+        frameSec,
+        framingMode,
+        tightness,
+        layoutTemplate,
+        aspectRatio,
+        splitRatio
+      );
       setDetectResult(result);
       if (result.facecamBox) setFacecamBox(result.facecamBox);
       else if (result.faceCount === 0) setFacecamBox(null);
@@ -1219,10 +1328,10 @@ export const LayoutStudio: React.FC = () => {
             <div className="pt-2 border-t border-border-subtle flex items-center justify-between gap-3">
               <div className="space-y-0.5">
                 <span className="text-xs font-mono font-medium text-slate-200 block">
-                  Dynamic Facecam Tracking (Auto-Follow Overlay Moves)
+                  Dynamic Subject Tracking (Auto-Follow Faces & Overlays)
                 </span>
                 <span className="text-[10px] font-mono text-slate-500 block">
-                  Follows facecam shifts smoothly in split vertical and picture-in-picture modes
+                  Tracks faces and camera/overlay shifts across Split, PiP, Side-by-Side, Wide+Dual, Fullscreen, and Active Speaker layouts
                 </span>
               </div>
               <button
@@ -1252,6 +1361,30 @@ export const LayoutStudio: React.FC = () => {
                   <span className="text-[10px] font-mono text-cyan-400">{aspectRatio} ({layoutTemplate.replace(/_/g, ' ')})</span>
                 </div>
                 <div className="flex items-center gap-2">
+                  {layoutTemplate === 'punch_in_zoom' && (
+                    <button
+                      type="button"
+                      onClick={() => setPunchInZoomed((z) => !z)}
+                      className={`px-2 py-0.5 text-[10px] font-mono rounded border transition-all ${
+                        punchInZoomed
+                          ? 'border-purple-500 text-purple-300 bg-purple-950 font-bold'
+                          : 'border-border text-slate-400 hover:text-slate-200'
+                      }`}
+                      title="Toggle preview between 100% and 112% punch-in zoom cut"
+                    >
+                      {punchInZoomed ? 'Auto Punch-In: 112%' : 'Auto Punch-In: 100%'}
+                    </button>
+                  )}
+                  {layoutTemplate === 'podcast_active_speaker' && (
+                    <button
+                      type="button"
+                      onClick={() => setActiveSpeakerHost((h) => (h === 'p1' ? 'p2' : 'p1'))}
+                      className="px-2 py-0.5 text-[10px] font-mono rounded border border-sky-500 text-sky-300 bg-sky-950 font-bold hover:bg-sky-900 transition-all"
+                      title="Toggle preview between Person 1 and Person 2 active speaker cuts"
+                    >
+                      Active Speaker: {activeSpeakerHost === 'p1' ? 'Person 1' : 'Person 2'}
+                    </button>
+                  )}
                   {/* Pane Fit Mode Toggle */}
                   <div className="flex items-center rounded border border-border p-0.5 bg-surface">
                     <button

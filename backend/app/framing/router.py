@@ -139,6 +139,9 @@ async def auto_detect_project_regions(
     t: float = Query(default=5.0, ge=0.0, description="Frame time for detection"),
     framing_mode: str = Query(default="gaming", description="Framing mode for smart person expansion"),
     tightness: str = Query(default="medium", description="Framing tightness: close, medium, wide"),
+    layout_template: str = Query(default="split_vertical", description="Layout template for aspect ratio matching"),
+    aspect_ratio: str = Query(default="9:16", description="Target aspect ratio"),
+    split_ratio: int = Query(default=50, ge=10, le=90, description="Split ratio percentage"),
     session: AsyncSession = Depends(get_db_session),
 ) -> AutoDetectResult:
     """
@@ -157,6 +160,9 @@ async def auto_detect_project_regions(
         time_sec=t,
         framing_mode=framing_mode,
         tightness=tightness,
+        layout_template=layout_template,
+        aspect_ratio=aspect_ratio,
+        split_ratio=split_ratio,
     )
     return result
 

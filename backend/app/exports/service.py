@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import shutil
+import sys
 import uuid
 from collections import deque
 from datetime import datetime, timezone
@@ -100,6 +101,57 @@ async def _run_process(
                     await on_progress(percent)
             except (ValueError, ZeroDivisionError):
                 pass
+        return_code = await process.wait()
+        await stderr_task
+        return return_code, b"".join(stderr_tail).decode("utf-8", errors="replace")
+    finally:
+        if process.returncode is None:
+            await ProcessManager.cancel_project(job_id)
+            await process.wait()
+        if not stderr_task.done():
+            stderr_task.cancel()
+            await asyncio.gather(stderr_task, return_exceptions=True)
+        await ProcessManager.unregister_process(job_id)
+
+
+async def _run_worker_process(
+    job_id: str,
+    command: list[str],
+    on_progress=None,
+    cwd: str | Path | None = None,
+) -> tuple[int, str]:
+    """Run a worker subprocess, drain stdout for PROGRESS:<percent>, drain stderr, and reap."""
+    process = await asyncio.create_subprocess_exec(
+        *command,
+        cwd=str(cwd or settings.backend_dir),
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    await ProcessManager.register_process(job_id, process.pid)
+    if await _cancelled(job_id):
+        await ProcessManager.cancel_project(job_id)
+
+    stderr_tail: deque[bytes] = deque(maxlen=300)
+
+    async def drain_stderr() -> None:
+        assert process.stderr
+        while line := await process.stderr.readline():
+            stderr_tail.append(line)
+
+    stderr_task = asyncio.create_task(drain_stderr())
+    last_percent = -1
+    try:
+        assert process.stdout
+        async for raw_line in process.stdout:
+            text = raw_line.decode("utf-8", errors="replace").strip()
+            if text.startswith("PROGRESS:") and on_progress:
+                try:
+                    percent = int(text.split(":", 1)[1].strip())
+                    if percent != last_percent:
+                        last_percent = percent
+                        await on_progress(percent)
+                except ValueError:
+                    pass
         return_code = await process.wait()
         await stderr_task
         return return_code, b"".join(stderr_tail).decode("utf-8", errors="replace")
@@ -257,6 +309,10 @@ async def _resolve_caption_config(project_id: str, config: CaptionConfig) -> Cap
                         "outline_width": ("outline_width", float),
                         "shadowDepth": ("shadow_depth", float),
                         "shadow_depth": ("shadow_depth", float),
+                        "shadowBlur": ("shadow_blur", float),
+                        "shadow_blur": ("shadow_blur", float),
+                        "shadowColor": ("shadow_color", str),
+                        "shadow_color": ("shadow_color", str),
                         "marginV": ("margin_v", int),
                         "margin_v": ("margin_v", int),
                         "positionYPercent": ("position_y_percent", float),
@@ -268,11 +324,31 @@ async def _resolve_caption_config(project_id: str, config: CaptionConfig) -> Cap
                         "animation": ("animation", str),
                         "profanityMask": ("profanity_mask", bool),
                         "profanity_mask": ("profanity_mask", bool),
+                        "secondaryFont": ("secondary_font", str),
+                        "secondary_font": ("secondary_font", str),
+                        "fontSwitchMode": ("font_switch_mode", str),
+                        "font_switch_mode": ("font_switch_mode", str),
+                        "secondaryItalic": ("secondary_italic", bool),
+                        "secondary_italic": ("secondary_italic", bool),
+                        "glowEnabled": ("glow_enabled", bool),
+                        "glow_enabled": ("glow_enabled", bool),
+                        "glowColor": ("glow_color", str),
+                        "glow_color": ("glow_color", str),
+                        "glowIntensity": ("glow_intensity", int),
+                        "glow_intensity": ("glow_intensity", int),
+                        "animationStyle": ("animation_style", str),
+                        "animation_style": ("animation_style", str),
+                        "letterSpacing": ("letter_spacing", float),
+                        "letter_spacing": ("letter_spacing", float),
                     }
                     for k, (attr, typ) in field_map.items():
                         if k in data and data[k] is not None:
                             try:
-                                updates[attr] = typ(data[k])
+                                val = data[k]
+                                if typ is bool:
+                                    updates[attr] = val if isinstance(val, bool) else str(val).lower() in ("true", "1")
+                                else:
+                                    updates[attr] = typ(val)
                             except (ValueError, TypeError):
                                 pass
                     if updates:
@@ -375,117 +451,140 @@ async def _run_batch(
                 ass_burn_filename = ass_file.name
                 ass_file_path = ass_file
 
-            # 3. Dynamic Facecam Tracking across segments
-            facecam_tracks = None
-            if (
-                request.framing_config.dynamic_facecam_tracking
-                and request.framing_config.layout_template in ("split_vertical", "pip")
-                and request.framing_config.facecam_box
-            ):
-                try:
-                    all_tracks = []
-                    offset = 0.0
-                    for seg_start, seg_end in base_segments:
-                        seg_dur = max(0.01, seg_end - seg_start)
-                        raw_tracks = await track_facecam_overlay(
-                            video_path, seg_start, seg_end, request.framing_config.facecam_box,
-                        )
-                        for r in raw_tracks:
-                            r_time = float(r.get("time", 0.0))
-                            mapped_time = map_time_to_output(seg_start + r_time, kept)
-                            if mapped_time is not None:
-                                all_tracks.append({
-                                    "time": mapped_time,
-                                    "x": r.get("x"),
-                                    "y": r.get("y"),
-                                })
-                            else:
-                                all_tracks.append({
-                                    "time": round(offset + r_time, 3),
-                                    "x": r.get("x"),
-                                    "y": r.get("y"),
-                                })
-                        offset += seg_dur
-                    facecam_tracks = all_tracks if all_tracks else None
-                    logger.info("Dynamic facecam tracking emitted %d keyframes for clip %s", len(facecam_tracks or []), clip.title)
-                except Exception as e:
-                    logger.warning("Dynamic facecam tracking failed, falling back to static crop: %s", e)
-                    facecam_tracks = None
-
-            framing, out_w, out_h = build_filter_complex(
-                request.framing_config, src_w, src_h,
-                ass_path=ass_burn_filename,
-                facecam_tracks=facecam_tracks,
-                watermark_input_index=len(base_segments),
-            )
+            # 3. Dynamic Facecam / Multi-Person Tracking or Pure-FFmpeg Export
+            layout = request.framing_config.layout_template
+            mode = request.framing_config.framing_mode
             watermark = request.framing_config.watermark
-            progress_duration = sum(right - left for left, right in kept)
-
-            async def report(percent: int) -> None:
-                job.progress_percent = round(100 * (index + percent / 100) / len(clips), 1)
-                await _publish(job_id)
-
             encoder_used = ""
-            for encoder in ("h264_nvenc", "libx264"):
-                command = build_export_command(
-                    video_path, str(temp_path), framing, out_w, out_h, start, end,
-                    encoder, kept, request.normalize_loudness,
-                    has_audio=has_audio,
-                    watermark_path=watermark.path if watermark else None,
-                    segments=base_segments,
-                )
 
-                # Export Debug Logging on every export
-                first_15_ass = ""
-                if ass_file_path and ass_file_path.is_file():
-                    lines = ass_file_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()[:15]
-                    first_15_ass = "\n".join(f"    {ln}" for ln in lines)
-                else:
-                    first_15_ass = "    (no captions burned)"
+            if request.framing_config.dynamic_facecam_tracking and layout != "blurred_fill":
+                worker_script = Path(__file__).resolve().parent.parent.parent / "workers" / "reframe_worker.py"
+                worker_cmd = [
+                    sys.executable,
+                    str(worker_script),
+                    "--video-path", str(video_path),
+                    "--output-path", str(temp_path),
+                    "--config-json", request.framing_config.model_dump_json(),
+                    "--intervals-json", json.dumps(kept),
+                    "--out-w", str(out_w),
+                    "--out-h", str(out_h),
+                    "--encoder", "h264_nvenc",
+                    "--cwd", str(output_dir),
+                ]
+                if request.normalize_loudness:
+                    worker_cmd.append("--normalize")
+                if has_audio:
+                    worker_cmd.append("--has-audio")
+                if ass_burn_filename:
+                    worker_cmd.extend(["--ass-path", str(ass_burn_filename)])
+                if watermark and watermark.path and Path(watermark.path).is_file():
+                    worker_cmd.extend(["--watermark-path", str(watermark.path)])
 
-                cmd_str = " ".join(command)
-                print(f"\n[CLIPFORGE EXPORT FFMPEG COMMAND]\n{cmd_str}\n", flush=True)
-                debug_log = (
-                    f"\n{'='*75}\n"
-                    f"[CLIPFORGE EXPORT DEBUG]\n"
-                    f"  Job ID:           {job_id}\n"
-                    f"  Clip:             {clip.title} (idx={index + 1}, {start:.2f}s - {end:.2f}s)\n"
-                    f"  Layout Template:  {request.framing_config.layout_template}\n"
-                    f"  Framing Mode:     {request.framing_config.framing_mode}\n"
-                    f"  Aspect Ratio:     {request.framing_config.aspect_ratio}\n"
-                    f"  Split Ratio:      {request.framing_config.split_ratio}\n"
-                    f"  Facecam Box:      {request.framing_config.facecam_box}\n"
-                    f"  Gameplay Box:     {request.framing_config.gameplay_box}\n"
-                    f"  Burn Captions:    {request.burn_captions}\n"
-                    f"  Caption Preset:   {request.caption_config.preset if request.caption_config else 'none'}\n"
-                    f"  ASS File Preview (First 15 lines):\n{first_15_ass}\n"
-                    f"  Encoder Attempt:  {encoder}\n"
-                    f"  Working Dir (cwd): {output_dir}\n"
-                    f"  FFmpeg Command:\n    {cmd_str}\n"
-                    f"{'='*75}"
-                )
-                print(debug_log, flush=True)
-                logger.info(debug_log)
+                cmd_str = " ".join(worker_cmd)
+                print(f"\n[CLIPFORGE DYNAMIC REFRAME WORKER COMMAND]\n{cmd_str}\n", flush=True)
+                logger.info("Executing Dynamic Reframe Worker for clip %s: %s", clip.title, cmd_str)
 
-                code, stderr = await _run_process(job_id, command, progress_duration, report, cwd=output_dir)
+                async def report_worker(percent: int) -> None:
+                    job.progress_percent = round(100 * (index + percent / 100) / len(clips), 1)
+                    await _publish(job_id)
+
+                code, stderr = await _run_worker_process(job_id, worker_cmd, report_worker, cwd=output_dir)
                 if await _cancelled(job_id):
+                    temp_path.unlink(missing_ok=True)
                     break
                 if code == 0 and temp_path.is_file() and temp_path.stat().st_size > 0:
-                    encoder_used = encoder
+                    encoder_used = "h264_nvenc"
+                    temp_path.replace(final_path)
+                else:
+                    temp_path.unlink(missing_ok=True)
+                    err_preview = stderr[-2000:] if stderr else "(no stderr)"
+                    print(f"[DYNAMIC REFRAME FATAL ERROR] Worker failed for clip '{clip.title}'. Stderr:\n{err_preview}", flush=True)
+                    raise RuntimeError(f"Dynamic reframe worker failed: {err_preview}")
+            else:
+                facecam_tracks = None
+                gameplay_tracks = None
+                is_supported_layout = layout in (
+                    "split_vertical", "split_inverted", "pip", "side_by_side_blur",
+                    "wide_plus_dual", "fullscreen_crop", "punch_in_zoom", "podcast_active_speaker"
+                )
+                is_two_person = (
+                    mode == "podcast"
+                    or layout in ("podcast_active_speaker", "side_by_side_blur", "wide_plus_dual")
+                )
+
+                framing, out_w, out_h = build_filter_complex(
+                    request.framing_config, src_w, src_h,
+                    ass_path=ass_burn_filename,
+                    facecam_tracks=facecam_tracks,
+                    gameplay_tracks=gameplay_tracks,
+                    watermark_input_index=len(base_segments),
+                )
+                progress_duration = sum(right - left for left, right in kept)
+
+                async def report(percent: int) -> None:
+                    job.progress_percent = round(100 * (index + percent / 100) / len(clips), 1)
+                    await _publish(job_id)
+
+                for encoder in ("h264_nvenc", "libx264"):
+                    command = build_export_command(
+                        video_path, str(temp_path), framing, out_w, out_h, start, end,
+                        encoder, kept, request.normalize_loudness,
+                        has_audio=has_audio,
+                        watermark_path=watermark.path if watermark else None,
+                        segments=base_segments,
+                    )
+
+                    # Export Debug Logging on every export
+                    first_15_ass = ""
+                    if ass_file_path and ass_file_path.is_file():
+                        lines = ass_file_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()[:15]
+                        first_15_ass = "\n".join(f"    {ln}" for ln in lines)
+                    else:
+                        first_15_ass = "    (no captions burned)"
+
+                    cmd_str = " ".join(command)
+                    print(f"\n[CLIPFORGE EXPORT FFMPEG COMMAND]\n{cmd_str}\n", flush=True)
+                    debug_log = (
+                        f"\n{'='*75}\n"
+                        f"[CLIPFORGE EXPORT DEBUG]\n"
+                        f"  Job ID:           {job_id}\n"
+                        f"  Clip:             {clip.title} (idx={index + 1}, {start:.2f}s - {end:.2f}s)\n"
+                        f"  Layout Template:  {request.framing_config.layout_template}\n"
+                        f"  Framing Mode:     {request.framing_config.framing_mode}\n"
+                        f"  Aspect Ratio:     {request.framing_config.aspect_ratio}\n"
+                        f"  Split Ratio:      {request.framing_config.split_ratio}\n"
+                        f"  Facecam Box:      {request.framing_config.facecam_box}\n"
+                        f"  Gameplay Box:     {request.framing_config.gameplay_box}\n"
+                        f"  Burn Captions:    {request.burn_captions}\n"
+                        f"  Caption Preset:   {request.caption_config.preset if request.caption_config else 'none'}\n"
+                        f"  ASS File Preview (First 15 lines):\n{first_15_ass}\n"
+                        f"  Encoder Attempt:  {encoder}\n"
+                        f"  Working Dir (cwd): {output_dir}\n"
+                        f"  FFmpeg Command:\n    {cmd_str}\n"
+                        f"{'='*75}"
+                    )
+                    print(debug_log, flush=True)
+                    logger.info(debug_log)
+
+                    code, stderr = await _run_process(job_id, command, progress_duration, report, cwd=output_dir)
+                    if await _cancelled(job_id):
+                        break
+                    if code == 0 and temp_path.is_file() and temp_path.stat().st_size > 0:
+                        encoder_used = encoder
+                        break
+                    temp_path.unlink(missing_ok=True)
+                    err_preview = stderr[-1500:] if stderr else "(no stderr)"
+                    print(f"[FFMPEG WARNING] Encoder {encoder} failed (code {code}):\n{err_preview}", flush=True)
+                    logger.warning("FFmpeg encoder %s failed (code %d):\n%s", encoder, code, err_preview)
+                    if encoder == "libx264":
+                        print(f"[FFMPEG FATAL ERROR] All encoders failed for clip '{clip.title}'. Stderr:\n{stderr[-2000:]}", flush=True)
+                        raise RuntimeError(f"FFmpeg export failed with NVENC and libx264: {stderr[-2000:]}")
+                if await _cancelled(job_id):
+                    temp_path.unlink(missing_ok=True)
                     break
-                temp_path.unlink(missing_ok=True)
-                err_preview = stderr[-1500:] if stderr else "(no stderr)"
-                print(f"[FFMPEG WARNING] Encoder {encoder} failed (code {code}):\n{err_preview}", flush=True)
-                logger.warning("FFmpeg encoder %s failed (code %d):\n%s", encoder, code, err_preview)
-                if encoder == "libx264":
-                    print(f"[FFMPEG FATAL ERROR] All encoders failed for clip '{clip.title}'. Stderr:\n{stderr[-2000:]}", flush=True)
-                    raise RuntimeError(f"FFmpeg export failed with NVENC and libx264: {stderr[-2000:]}")
-            if await _cancelled(job_id):
-                temp_path.unlink(missing_ok=True)
-                break
-            if not encoder_used:
-                raise RuntimeError("FFmpeg export did not produce an output file")
-            temp_path.replace(final_path)
+                if not encoder_used:
+                    raise RuntimeError("FFmpeg export did not produce an output file")
+                temp_path.replace(final_path)
 
             if ass_file_path and ass_file_path.is_file():
                 ass_file_path.unlink(missing_ok=True)
@@ -628,81 +727,119 @@ async def render_preview(
             ass_file_path = ass_file
 
     facecam_tracks = None
-    if (
-        request.framing_config.dynamic_facecam_tracking
-        and request.framing_config.layout_template in ("split_vertical", "pip")
-        and request.framing_config.facecam_box
-    ):
-        try:
-            facecam_tracks = await track_facecam_overlay(
-                video_path, start, end, request.framing_config.facecam_box,
-            )
-            logger.info("Dynamic facecam preview tracking emitted %d keyframes", len(facecam_tracks))
-        except Exception as e:
-            logger.warning("Dynamic facecam preview tracking failed: %s", e)
-            facecam_tracks = None
-
-    framing, out_w, out_h = build_filter_complex(
-        request.framing_config, src_w, src_h, ass_path=ass_burn_filename, facecam_tracks=facecam_tracks,
-    )
+    layout = request.framing_config.layout_template
+    mode = request.framing_config.framing_mode
     watermark = request.framing_config.watermark
     output = output_dir / f"preview_{uuid.uuid4().hex}.mp4"
     temp = output.with_name(output.stem + ".partial.mp4")
-    try:
-        error_text = ""
-        for encoder in ("h264_nvenc", "libx264"):
-            command = build_export_command(
-                video_path, str(temp), framing, out_w, out_h, start, end,
-                encoder, kept, request.normalize_loudness,
-                has_audio=has_audio,
-                watermark_path=watermark.path if watermark else None,
-            )
 
-            first_15_ass = ""
-            if ass_file_path and ass_file_path.is_file():
-                lines = ass_file_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()[:15]
-                first_15_ass = "\n".join(f"    {ln}" for ln in lines)
-            else:
-                first_15_ass = "    (no captions burned)"
+    if request.framing_config.dynamic_facecam_tracking and layout != "blurred_fill":
+        worker_script = Path(__file__).resolve().parent.parent.parent / "workers" / "reframe_worker.py"
+        worker_cmd = [
+            sys.executable,
+            str(worker_script),
+            "--video-path", str(video_path),
+            "--output-path", str(temp),
+            "--config-json", request.framing_config.model_dump_json(),
+            "--intervals-json", json.dumps(kept),
+            "--out-w", str(out_w),
+            "--out-h", str(out_h),
+            "--encoder", "h264_nvenc",
+            "--cwd", str(output_dir),
+        ]
+        if request.normalize_loudness:
+            worker_cmd.append("--normalize")
+        if has_audio:
+            worker_cmd.append("--has-audio")
+        if ass_burn_filename:
+            worker_cmd.extend(["--ass-path", str(ass_burn_filename)])
+        if watermark and watermark.path and Path(watermark.path).is_file():
+            worker_cmd.extend(["--watermark-path", str(watermark.path)])
 
-            cmd_str = " ".join(command)
-            print(f"\n[CLIPFORGE PREVIEW FFMPEG COMMAND]\n{cmd_str}\n", flush=True)
-            debug_log = (
-                f"\n{'='*75}\n"
-                f"[CLIPFORGE PREVIEW DEBUG]\n"
-                f"  Preview ID:       {preview_id}\n"
-                f"  Bounds:           {start:.2f}s - {end:.2f}s\n"
-                f"  Layout Template:  {request.framing_config.layout_template}\n"
-                f"  Framing Mode:     {request.framing_config.framing_mode}\n"
-                f"  Aspect Ratio:     {request.framing_config.aspect_ratio}\n"
-                f"  Split Ratio:      {request.framing_config.split_ratio}\n"
-                f"  Facecam Box:      {request.framing_config.facecam_box}\n"
-                f"  Gameplay Box:     {request.framing_config.gameplay_box}\n"
-                f"  Burn Captions:    {request.burn_captions}\n"
-                f"  Caption Preset:   {request.caption_config.preset if request.caption_config else 'none'}\n"
-                f"  ASS File Preview (First 15 lines):\n{first_15_ass}\n"
-                f"  Working Dir (cwd): {output_dir}\n"
-                f"  FFmpeg Command:\n    {cmd_str}\n"
-                f"{'='*75}"
-            )
-            print(debug_log, flush=True)
-            logger.info(debug_log)
+        cmd_str = " ".join(worker_cmd)
+        print(f"\n[CLIPFORGE DYNAMIC REFRAME PREVIEW COMMAND]\n{cmd_str}\n", flush=True)
+        logger.info("Executing Dynamic Reframe Worker for preview: %s", cmd_str)
 
-            code, error_text = await _run_process(preview_id, command, sum(b - a for a, b in kept), cwd=output_dir)
-            if code == 0 and temp.is_file() and temp.stat().st_size:
+        try:
+            code, stderr = await _run_worker_process(preview_id, worker_cmd, cwd=output_dir)
+            if code == 0 and temp.is_file() and temp.stat().st_size > 0:
                 temp.replace(output)
                 return output
             temp.unlink(missing_ok=True)
-            err_preview = error_text[-1500:] if error_text else "(no stderr)"
-            print(f"[FFMPEG PREVIEW WARNING] Encoder {encoder} failed (code {code}):\n{err_preview}", flush=True)
-            logger.warning("FFmpeg preview encoder %s failed (code %d):\n%s", encoder, code, err_preview)
-        print(f"[FFMPEG PREVIEW FATAL ERROR] Preview render failed:\n{error_text[-2000:]}", flush=True)
-        raise RuntimeError(f"FFmpeg preview failed with NVENC and libx264: {error_text[-2000:]}")
-    finally:
-        await ProcessManager.cancel_project(preview_id)
-        temp.unlink(missing_ok=True)
-        if ass_file_path:
-            ass_file_path.unlink(missing_ok=True)
+            err_preview = stderr[-2000:] if stderr else "(no stderr)"
+            print(f"[DYNAMIC REFRAME PREVIEW FATAL ERROR] Preview failed:\n{err_preview}", flush=True)
+            raise RuntimeError(f"Dynamic reframe preview failed: {err_preview}")
+        finally:
+            await ProcessManager.cancel_project(preview_id)
+            temp.unlink(missing_ok=True)
+            if ass_file_path and ass_file_path.is_file():
+                ass_file_path.unlink(missing_ok=True)
+    else:
+        facecam_tracks = None
+        gameplay_tracks = None
+        framing, out_w, out_h = build_filter_complex(
+            request.framing_config, src_w, src_h,
+            ass_path=ass_burn_filename,
+            facecam_tracks=facecam_tracks,
+            gameplay_tracks=gameplay_tracks,
+            watermark_input_index=1,
+        )
+        try:
+            error_text = ""
+            for encoder in ("h264_nvenc", "libx264"):
+                command = build_export_command(
+                    video_path, str(temp), framing, out_w, out_h, start, end,
+                    encoder, kept, request.normalize_loudness,
+                    has_audio=has_audio,
+                    watermark_path=watermark.path if watermark else None,
+                    segments=[(start, end)],
+                )
+
+                first_15_ass = ""
+                if ass_file_path and ass_file_path.is_file():
+                    lines = ass_file_path.read_text(encoding="utf-8-sig", errors="replace").splitlines()[:15]
+                    first_15_ass = "\n".join(f"    {ln}" for ln in lines)
+                else:
+                    first_15_ass = "    (no captions burned)"
+
+                cmd_str = " ".join(command)
+                print(f"\n[CLIPFORGE PREVIEW FFMPEG COMMAND]\n{cmd_str}\n", flush=True)
+                debug_log = (
+                    f"\n{'='*75}\n"
+                    f"[CLIPFORGE PREVIEW DEBUG]\n"
+                    f"  Preview ID:       {preview_id}\n"
+                    f"  Bounds:           {start:.2f}s - {end:.2f}s\n"
+                    f"  Layout Template:  {request.framing_config.layout_template}\n"
+                    f"  Framing Mode:     {request.framing_config.framing_mode}\n"
+                    f"  Aspect Ratio:     {request.framing_config.aspect_ratio}\n"
+                    f"  Split Ratio:      {request.framing_config.split_ratio}\n"
+                    f"  Facecam Box:      {request.framing_config.facecam_box}\n"
+                    f"  Gameplay Box:     {request.framing_config.gameplay_box}\n"
+                    f"  Burn Captions:    {request.burn_captions}\n"
+                    f"  Caption Preset:   {request.caption_config.preset if request.caption_config else 'none'}\n"
+                    f"  ASS File Preview (First 15 lines):\n{first_15_ass}\n"
+                    f"  Working Dir (cwd): {output_dir}\n"
+                    f"  FFmpeg Command:\n    {cmd_str}\n"
+                    f"{'='*75}"
+                )
+                print(debug_log, flush=True)
+                logger.info(debug_log)
+
+                code, error_text = await _run_process(preview_id, command, sum(b - a for a, b in kept), cwd=output_dir)
+                if code == 0 and temp.is_file() and temp.stat().st_size:
+                    temp.replace(output)
+                    return output
+                temp.unlink(missing_ok=True)
+                err_preview = error_text[-1500:] if error_text else "(no stderr)"
+                print(f"[FFMPEG PREVIEW WARNING] Encoder {encoder} failed (code {code}):\n{err_preview}", flush=True)
+                logger.warning("FFmpeg preview encoder %s failed (code %d):\n%s", encoder, code, err_preview)
+            print(f"[FFMPEG PREVIEW FATAL ERROR] Preview render failed:\n{error_text[-2000:]}", flush=True)
+            raise RuntimeError(f"FFmpeg preview failed with NVENC and libx264: {error_text[-2000:]}")
+        finally:
+            await ProcessManager.cancel_project(preview_id)
+            temp.unlink(missing_ok=True)
+            if ass_file_path:
+                ass_file_path.unlink(missing_ok=True)
 
 
 def _timestamp(seconds: float) -> str:

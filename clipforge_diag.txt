@@ -1,0 +1,615 @@
+﻿=== RUNNING SERVER ===
+
+
+ProcessId      : 18948
+ExecutablePath : D:\New folder\clipforge\.venv\Scripts\python.exe
+CommandLine    : "D:\New folder\clipforge\.venv\Scripts\python.exe" -m pytest tests/test_multi_segment.py 
+                 tests/test_dynamic_facecam_filter.py tests/test_startup_imports.py tests/test_phase4_framing.py
+
+ProcessId      : 12324
+ExecutablePath : C:\Users\Parv\AppData\Local\Programs\Python\Python311\python.exe
+CommandLine    : "C:\Users\Parv\AppData\Local\Programs\Python\Python311\python.exe" -m pytest 
+                 tests/test_multi_segment.py tests/test_dynamic_facecam_filter.py tests/test_startup_imports.py 
+                 tests/test_phase4_framing.py
+
+ProcessId      : 13048
+ExecutablePath : D:\New folder\clipforge\.venv\Scripts\python.exe
+CommandLine    : "D:\New folder\clipforge\.venv\Scripts\python.exe" -m pytest tests/test_multi_segment.py 
+                 tests/test_dynamic_facecam_filter.py tests/test_startup_imports.py tests/test_phase4_framing.py
+
+ProcessId      : 19324
+ExecutablePath : C:\Users\Parv\AppData\Local\Programs\Python\Python311\python.exe
+CommandLine    : "C:\Users\Parv\AppData\Local\Programs\Python\Python311\python.exe" -m pytest 
+                 tests/test_multi_segment.py tests/test_dynamic_facecam_filter.py tests/test_startup_imports.py 
+                 tests/test_phase4_framing.py
+
+ProcessId      : 11992
+ExecutablePath : D:\New folder\clipforge\.venv\Scripts\python.exe
+CommandLine    : "D:\New folder\clipforge\.venv\Scripts\python.exe" -m pytest tests/test_multi_segment.py 
+                 tests/test_dynamic_facecam_filter.py tests/test_startup_imports.py tests/test_phase4_framing.py
+
+ProcessId      : 15228
+ExecutablePath : C:\Users\Parv\AppData\Local\Programs\Python\Python311\python.exe
+CommandLine    : "C:\Users\Parv\AppData\Local\Programs\Python\Python311\python.exe" -m pytest 
+                 tests/test_multi_segment.py tests/test_dynamic_facecam_filter.py tests/test_startup_imports.py 
+                 tests/test_phase4_framing.py
+
+ProcessId      : 17940
+ExecutablePath : D:\New folder\clipforge\.venv\Scripts\python.exe
+CommandLine    : "D:\New folder\clipforge\.venv\Scripts\python.exe" -m pytest "d:\New folder\clipforge\tests"
+
+ProcessId      : 8840
+ExecutablePath : C:\Users\Parv\AppData\Local\Programs\Python\Python311\python.exe
+CommandLine    : "C:\Users\Parv\AppData\Local\Programs\Python\Python311\python.exe" -m pytest "d:\New 
+                 folder\clipforge\tests"
+
+ProcessId      : 6136
+ExecutablePath : D:\New folder\clipforge\.venv\Scripts\python.exe
+CommandLine    : "D:\New folder\clipforge\.venv\Scripts\python.exe"  "D:\New folder\clipforge\backend\run.py" --desktop
+
+ProcessId      : 16436
+ExecutablePath : C:\Users\Parv\AppData\Local\Programs\Python\Python311\python.exe
+CommandLine    : "C:\Users\Parv\AppData\Local\Programs\Python\Python311\python.exe" "D:\New 
+                 folder\clipforge\backend\run.py" --desktop
+
+
+
+
+=== LATEST EXPORTED MP4 ===
+File: D:\New folder\clipforge\workspace_cache\projects\proj_20261123_163455_404518\renders\exports\b24256320b7f45ccba6dcbced1c0d13d\Magazines_Over_Books_17.mp4 | Modified: 11/24/2026 00:06:13
+index=0
+codec_name=h264
+codec_type=video
+duration=25.859167
+
+
+=== media.py ===
+"""Synchronized FFmpeg graph and subtitle timeline helpers for Phase 6 exports."""
+
+from __future__ import annotations
+
+import re
+import shutil
+from pathlib import Path
+
+
+def map_time_to_output(time_sec: float, kept_intervals: list[tuple[float, float]]) -> float | None:
+    """Map an original source timestamp into the concatenated output timeline."""
+    elapsed = 0.0
+    for start, end in kept_intervals:
+        if (start - 0.04) <= time_sec <= (end + 0.04):
+            clamped = min(max(time_sec, start), end)
+            return round(elapsed + (clamped - start), 6)
+        elapsed += max(0.0, end - start)
+    return None
+
+
+def calculate_keep_intervals(
+    start_sec: float,
+    end_sec: float,
+    silence_intervals: list[tuple[float, float]],
+    padding_sec: float = 0.08,
+) -> list[tuple[float, float]]:
+    """Remove detected pauses while retaining a small breath around each pause."""
+    clipped = sorted(
+        (max(start_sec, start - padding_sec), min(end_sec, end + padding_sec))
+        for start, end in silence_intervals
+        if end > start_sec and start < end_sec
+    )
+    merged: list[tuple[float, float]] = []
+    for start, end in clipped:
+        if merged and start <= merged[-1][1]:
+            merged[-1] = (merged[-1][0], max(merged[-1][1], end))
+        else:
+            merged.append((start, end))
+    kept: list[tuple[float, float]] = []
+    cursor = start_sec
+    for silence_start, silence_end in merged:
+        if silence_start - cursor > 0.04:
+            kept.append((cursor, silence_start))
+        cursor = max(cursor, silence_end)
+    if end_sec - cursor > 0.04:
+        kept.append((cursor, end_sec))
+    return kept or [(start_sec, end_sec)]
+
+
+def parse_silencedetect(stderr: str, offset_sec: float = 0.0) -> list[tuple[float, float]]:
+    """Parse FFmpeg silencedetect stderr into absolute source-time intervals."""
+    starts = re.finditer(r"silence_start:\s*(-?\d+(?:\.\d+)?)", stderr)
+    ends = list(re.finditer(r"silence_end:\s*(-?\d+(?:\.\d+)?)", stderr))
+    intervals: list[tuple[float, float]] = []
+    end_index = 0
+    for match in starts:
+        start = float(match.group(1))
+        while end_index < len(ends) and float(ends[end_index].group(1)) < start:
+            end_index += 1
+        if end_index < len(ends):
+            end = float(ends[end_index].group(1))
+            end_index += 1
+        else:
+            duration_match = re.search(r"silence_duration:\s*(\d+(?:\.\d+)?)", stderr[match.end():])
+            end = start + float(duration_match.group(1)) if duration_match else start
+        if end > start:
+            intervals.append((offset_sec + start, offset_sec + end))
+    return intervals
+
+
+def build_export_filter_graph(
+    framing_filter: str,
+    start_sec: float,
+    end_sec: float,
+    kept_intervals: list[tuple[float, float]],
+    normalize: bool,
+    has_audio: bool = True,
+    segments: list[tuple[float, float]] | None = None,
+) -> str:
+    """
+    Build trimming and concatenation filtergraph before applying the framing filter graph.
+
+    For multi-segment clips and single-segment clips, each segment has its own fast-seeked input stream [k:v] / [k:a].
+    PTS is normalized, 20ms afade edges prevent audio clicks, and streams concat into [srcv] & [srca_raw].
+    """
+    multi_segments = [s for s in (segments or []) if s[1] > s[0]][:8]
+    effective_segments = multi_segments if multi_segments else ([(start_sec, end_sec)] if end_sec > start_sec else [(0.0, 1.0)])
+    all_kept = kept_intervals or effective_segments
+
+    parts: list[str] = []
+    video_labels: list[str] = []
+    audio_labels: list[str] = []
+
+    for k, (seg_start, seg_end) in enumerate(effective_segments):
+        seg_dur = max(0.01, seg_end - seg_start)
+        sub_intervals = [
+            (max(seg_start, it[0]), min(seg_end, it[1]))
+            for it in all_kept
+            if it[1] > seg_start and it[0] < seg_end
+        ]
+        if not sub_intervals:
+            sub_intervals = [(seg_start, seg_end)]
+
+        is_full_segment = (
+            len(sub_intervals) == 1
+            and abs(sub_intervals[0][0] - seg_start) < 0.05
+            and abs(sub_intervals[0][1] - seg_end) < 0.05
+        )
+
+        if is_full_segment:
+            v_lbl = f"vseg{k}"
+            parts.append(f"[{k}:v]setpts=PTS-STARTPTS[{v_lbl}]")
+            video_labels.append(f"[{v_lbl}]")
+
+            if has_audio:
+                a_lbl = f"aseg{k}"
+                fade_str = ""
+                if seg_dur > 0.15:
+                    fade_out_st = round(seg_dur - 0.02, 3)
+                    fade_str = f",afade=t=in:st=0:d=0.020,afade=t=out:st={fade_out_st:.3f}:d=0.020"
+                parts.append(f"[{k}:a]asetpts=PTS-STARTPTS{fade_str}[{a_lbl}]")
+                audio_labels.append(f"[{a_lbl}]")
+        else:
+            for j, (sub_s, sub_e) in enumerate(sub_intervals):
+                rel_s = max(0.0, sub_s - seg_start)
+                rel_e = min(seg_dur, sub_e - seg_start)
+                sub_dur = max(0.001, rel_e - rel_s)
+
+                v_lbl = f"vseg{k}_{j}"
+                parts.append(f"[{k}:v]trim=start={rel_s:.6f}:end={rel_e:.6f},setpts=PTS-STARTPTS[{v_lbl}]")
+                video_labels.append(f"[{v_lbl}]")
+
+                if has_audio:
+                    a_lbl = f"aseg{k}_{j}"
+                    fade_str = ""
+                    if sub_dur > 0.15:
+                        fade_out_st = round(sub_dur - 0.02, 3)
+                        fade_str = f",afade=t=in:st=0:d=0.020,afade=t=out:st={fade_out_st:.3f}:d=0.020"
+                    parts.append(
+                        f"[{k}:a]atrim=start={rel_s:.6f}:end={rel_e:.6f},asetpts=PTS-STARTPTS{fade_str}[{a_lbl}]"
+                    )
+                    audio_labels.append(f"[{a_lbl}]")
+
+    num_pieces = len(video_labels)
+    if num_pieces == 1:
+        parts.append(f"{video_labels[0]}null[srcv]")
+        if has_audio:
+            parts.append(f"{audio_labels[0]}anull[srca_raw]")
+    else:
+        parts.append(f"{''.join(video_labels)}concat=n={num_pieces}:v=1:a=0[srcv]")
+        if has_audio:
+            parts.append(f"{''.join(audio_labels)}concat=n={num_pieces}:v=0:a=1[srca_raw]")
+
+    parts.append(framing_filter.replace("[0:v]", "[srcv]"))
+    if has_audio:
+        audio_filter = "[srca_raw]loudnorm=I=-14:TP=-1.5:LRA=11[aout]" if normalize else "[srca_raw]anull[aout]"
+        parts.append(audio_filter)
+    return ";".join(parts)
+
+
+def build_export_command(
+    input_path: str,
+    output_path: str,
+    framing_filter: str,
+    src_w: int,
+    src_h: int,
+    start_sec: float,
+    end_sec: float,
+    encoder: str,
+    kept_intervals: list[tuple[float, float]],
+    normalize: bool,
+    has_audio: bool = True,
+    watermark_path: str | None = None,
+    segments: list[tuple[float, float]] | None = None,
+) -> list[str]:
+    """Build a CFR export command with fast input seeking per segment and optional watermark stream."""
+    multi_segments = [s for s in (segments or []) if s[1] > s[0]][:8]
+    effective_segments = multi_segments if multi_segments else ([(start_sec, end_sec)] if end_sec > start_sec else [(0.0, 1.0)])
+    all_kept = kept_intervals or effective_segments
+
+    graph = build_export_filter_graph(
+        framing_filter=framing_filter,
+        start_sec=start_sec,
+        end_sec=end_sec,
+        kept_intervals=all_kept,
+        normalize=normalize,
+        has_audio=has_audio,
+        segments=effective_segments,
+    )
+    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+    command = [ffmpeg, "-hide_banner", "-y"]
+
+    # Fast Seeking: One input per segment with -ss <start> -t <duration> -i <source>
+    for seg_start, seg_end in effective_segments:
+        seg_dur = max(0.01, seg_end - seg_start)
+        command += ["-ss", f"{seg_start:.6f}", "-t", f"{seg_dur:.6f}", "-i", input_path]
+
+    # Watermark input is added AFTER all segment inputs (input index = len(effective_segments))
+    if watermark_path and Path(watermark_path).is_file():
+        command += ["-i", watermark_path]
+
+    output_duration = sum(max(0.0, end - start) for start, end in all_kept)
+    video_map = "[v_final]" if "[v_final]" in graph else "[vout]"
+    command += ["-t", f"{output_duration:.6f}", "-filter_complex", graph, "-map", video_map]
+    if has_audio:
+        audio_map = "[aout]" if "[aout]" in graph else "0:a:0?"
+        command += ["-map", audio_map, "-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+    else:
+        command += ["-an"]
+    command += ["-fps_mode", "cfr", "-sn", "-movflags", "+faststart", "-progress", "pipe:1", "-nostats"]
+    if encoder == "h264_nvenc":
+        command += ["-c:v", "h264_nvenc", "-preset", "p4", "-rc:v", "vbr", "-cq:v", "19", "-b:v", "0", "-pix_fmt", "yuv420p"]
+    else:
+        command += ["-c:v", "libx264", "-crf", "18", "-preset", "fast", "-pix_fmt", "yuv420p"]
+    command.append(output_path)
+    return command
+
+
+def map_transcript(transcript, kept_intervals: list[tuple[float, float]]):
+    """Return a transcript with word and segment times translated to export time."""
+    from app.projects.schemas import TranscriptData, TranscriptSegment, WordTimestamp
+
+    segments = []
+    for segment in transcript.segments:
+        words = []
+        for word in segment.words:
+            w_start = None
+            w_end = None
+            for k_start, k_end in kept_intervals:
+                if word.end > k_start and word.start < k_end:
+                    clamped_s = max(word.start, k_start)
+                    clamped_e = min(word.end, k_end)
+                    w_start = map_time_to_output(clamped_s, kept_intervals)
+                    w_end = map_time_to_output(clamped_e, kept_intervals)
+                    break
+
+            if w_start is None or w_end is None or w_end <= w_start:
+                continue
+            words.append(WordTimestamp(word=word.word, start=w_start, end=w_end, confidence=word.confidence))
+
+        if words:
+            segments.append(TranscriptSegment(
+                id=segment.id, start=words[0].start, end=words[-1].end,
+                text=" ".join(word.word for word in words), words=words,
+            ))
+    duration = sum(end - start for start, end in kept_intervals)
+    return TranscriptData(
+        language=transcript.language,
+        language_probability=transcript.language_probability,
+        duration=duration,
+        segments=segments,
+    )
+
+=== service.py (tracking & export calls) ===
+
+  backend\app\exports\service.py:25:    parse_silencedetect,
+  backend\app\exports\service.py:26:)
+  backend\app\exports\service.py:27:from app.exports.schemas import BatchExportRequest, ExportClip, ExportJobRead, 
+PreviewRequest
+> backend\app\exports\service.py:28:from app.framing.auto_detect import track_facecam_overlay
+> backend\app\exports\service.py:29:from app.framing.ffmpeg_builder import build_filter_complex
+  backend\app\exports\service.py:30:from app.framing.schemas import FramingConfig, RegionBox, WatermarkConfig
+  backend\app\exports\service.py:31:from app.projects.schemas import TranscriptData
+  backend\app\exports\service.py:32:
+  backend\app\exports\service.py:33:
+  backend\app\exports\service.py:34:_JOBS: dict[str, ExportJobRead] = {}
+  backend\app\exports\service.py:67:    on_progress=None,
+  backend\app\exports\service.py:68:    cwd: str | Path | None = None,
+  backend\app\exports\service.py:69:) -> tuple[int, str]:
+> backend\app\exports\service.py:70:    """Run one FFmpeg process, drain both pipes, and always wait/reap after 
+termination."""
+  backend\app\exports\service.py:71:    process = await asyncio.create_subprocess_exec(
+  backend\app\exports\service.py:72:        *command,
+  backend\app\exports\service.py:73:        cwd=str(cwd or settings.backend_dir),
+  backend\app\exports\service.py:74:        stdout=asyncio.subprocess.PIPE,
+  backend\app\exports\service.py:75:        stderr=asyncio.subprocess.PIPE,
+  backend\app\exports\service.py:117:    job_id: str, video_path: str, start_sec: float, end_sec: float,
+  backend\app\exports\service.py:118:    threshold_db: float, min_duration_sec: float,
+  backend\app\exports\service.py:119:) -> list[tuple[float, float]]:
+> backend\app\exports\service.py:120:    ffmpeg = shutil.which("ffmpeg") or "ffmpeg"
+  backend\app\exports\service.py:121:    command = [
+> backend\app\exports\service.py:122:        ffmpeg, "-hide_banner", "-ss", str(start_sec), "-t", str(end_sec - 
+start_sec),
+  backend\app\exports\service.py:123:        "-i", video_path, "-vn", "-af",
+  backend\app\exports\service.py:124:        f"silencedetect=noise={threshold_db:g}dB:d={min_duration_sec:g}",
+  backend\app\exports\service.py:125:        "-f", "null", "-",
+  backend\app\exports\service.py:126:    ]
+  backend\app\exports\service.py:127:    code, stderr = await _run_process(job_id, command, end_sec - start_sec)
+  backend\app\exports\service.py:128:    if await _cancelled(job_id):
+  backend\app\exports\service.py:129:        return []
+  backend\app\exports\service.py:130:    if code:
+> backend\app\exports\service.py:131:        raise RuntimeError(f"FFmpeg silence detection failed: {stderr[-1200:]}")
+  backend\app\exports\service.py:132:    return parse_silencedetect(stderr, offset_sec=start_sec)
+  backend\app\exports\service.py:133:
+  backend\app\exports\service.py:134:
+  backend\app\exports\service.py:135:async def create_job(
+  backend\app\exports\service.py:136:    project_id: str,
+  backend\app\exports\service.py:194:                    if isinstance(s_ratio, (int, float)) and config.split_ratio 
+== 35 and int(s_ratio) != 35:
+  backend\app\exports\service.py:195:                        updates["split_ratio"] = int(s_ratio)
+  backend\app\exports\service.py:196:
+> backend\app\exports\service.py:197:                    dynamic_facecam = data.get("dynamicFacecamTracking") if 
+"dynamicFacecamTracking" in data else data.get("dynamic_facecam_tracking")
+> backend\app\exports\service.py:198:                    if dynamic_facecam is not None:
+> backend\app\exports\service.py:199:                        updates["dynamic_facecam_tracking"] = 
+bool(dynamic_facecam)
+  backend\app\exports\service.py:200:
+  backend\app\exports\service.py:201:                    wm_path = data.get("watermarkPath")
+  backend\app\exports\service.py:202:                    if wm_path and not (config.watermark and 
+config.watermark.path):
+  backend\app\exports\service.py:203:                        updates["watermark"] = WatermarkConfig(
+  backend\app\exports\service.py:204:                            path=wm_path,
+  backend\app\exports\service.py:383:            temp_path = output_dir / f"{out_stem}.partial.mp4"
+  backend\app\exports\service.py:384:
+  backend\app\exports\service.py:385:            # 1. Determine base canvas dimensions
+> backend\app\exports\service.py:386:            _, out_w, out_h = build_filter_complex(request.framing_config, src_w, 
+src_h)
+  backend\app\exports\service.py:387:
+  backend\app\exports\service.py:388:            # 2. Burn captions into video stream if enabled and transcript exists
+  backend\app\exports\service.py:389:            ass_burn_filename = None
+  backend\app\exports\service.py:390:            ass_file_path = None
+  backend\app\exports\service.py:391:            if request.burn_captions:
+  backend\app\exports\service.py:400:                ass_file_path = ass_file
+  backend\app\exports\service.py:401:
+  backend\app\exports\service.py:402:            # 3. Dynamic Facecam / Multi-Person Tracking across segments
+> backend\app\exports\service.py:403:            facecam_tracks = None
+> backend\app\exports\service.py:404:            gameplay_tracks = None
+  backend\app\exports\service.py:405:            layout = request.framing_config.layout_template
+  backend\app\exports\service.py:406:            mode = request.framing_config.framing_mode
+  backend\app\exports\service.py:407:            is_supported_layout = layout in (
+  backend\app\exports\service.py:408:                "split_vertical", "split_inverted", "pip", "side_by_side_blur",
+  backend\app\exports\service.py:409:                "wide_plus_dual", "fullscreen_crop", "punch_in_zoom", 
+"podcast_active_speaker"
+  backend\app\exports\service.py:413:                or layout in ("podcast_active_speaker", "side_by_side_blur", 
+"wide_plus_dual")
+  backend\app\exports\service.py:414:            )
+  backend\app\exports\service.py:415:
+> backend\app\exports\service.py:416:            if request.framing_config.dynamic_facecam_tracking and 
+is_supported_layout:
+  backend\app\exports\service.py:417:                target_box_1 = request.framing_config.facecam_box or (
+  backend\app\exports\service.py:418:                    request.framing_config.gameplay_box if layout in 
+("fullscreen_crop", "punch_in_zoom") else None
+  backend\app\exports\service.py:419:                )
+  backend\app\exports\service.py:420:                if target_box_1:
+  backend\app\exports\service.py:421:                    try:
+  backend\app\exports\service.py:423:                        offset = 0.0
+  backend\app\exports\service.py:424:                        for seg_start, seg_end in base_segments:
+  backend\app\exports\service.py:425:                            seg_dur = max(0.01, seg_end - seg_start)
+> backend\app\exports\service.py:426:                            raw_tracks = await track_facecam_overlay(
+  backend\app\exports\service.py:427:                                video_path, seg_start, seg_end, target_box_1, 
+framing_mode=mode,
+  backend\app\exports\service.py:428:                            )
+  backend\app\exports\service.py:429:                            for r in raw_tracks:
+  backend\app\exports\service.py:430:                                r_time = float(r.get("time", 0.0))
+  backend\app\exports\service.py:431:                                mapped_time = map_time_to_output(seg_start + 
+r_time, kept)
+  backend\app\exports\service.py:436:                                    "cut": r.get("cut", False),
+  backend\app\exports\service.py:437:                                })
+  backend\app\exports\service.py:438:                            offset += seg_dur
+> backend\app\exports\service.py:439:                        facecam_tracks = all_tracks if all_tracks else None
+> backend\app\exports\service.py:440:                        logger.info("Dynamic facecam tracking emitted %d 
+keyframes for clip %s", len(facecam_tracks or []), clip.title)
+  backend\app\exports\service.py:441:                    except Exception as e:
+  backend\app\exports\service.py:442:                        logger.warning("Dynamic facecam tracking failed, falling 
+back to static crop: %s", e)
+> backend\app\exports\service.py:443:                        facecam_tracks = None
+  backend\app\exports\service.py:444:
+  backend\app\exports\service.py:445:                target_box_2 = request.framing_config.gameplay_box
+  backend\app\exports\service.py:446:                if is_two_person and target_box_2:
+  backend\app\exports\service.py:447:                    try:
+  backend\app\exports\service.py:448:                        all_tracks_2 = []
+  backend\app\exports\service.py:449:                        offset = 0.0
+  backend\app\exports\service.py:450:                        for seg_start, seg_end in base_segments:
+  backend\app\exports\service.py:451:                            seg_dur = max(0.01, seg_end - seg_start)
+> backend\app\exports\service.py:452:                            raw_tracks_2 = await track_facecam_overlay(
+  backend\app\exports\service.py:453:                                video_path, seg_start, seg_end, target_box_2, 
+framing_mode=mode,
+  backend\app\exports\service.py:454:                            )
+  backend\app\exports\service.py:455:                            for r in raw_tracks_2:
+  backend\app\exports\service.py:456:                                r_time = float(r.get("time", 0.0))
+  backend\app\exports\service.py:457:                                mapped_time = map_time_to_output(seg_start + 
+r_time, kept)
+  backend\app\exports\service.py:462:                                    "cut": r.get("cut", False),
+  backend\app\exports\service.py:463:                                })
+  backend\app\exports\service.py:464:                            offset += seg_dur
+> backend\app\exports\service.py:465:                        gameplay_tracks = all_tracks_2 if all_tracks_2 else None
+> backend\app\exports\service.py:466:                        logger.info("Dynamic gameplay/person2 tracking emitted %d 
+keyframes for clip %s", len(gameplay_tracks or []), clip.title)
+  backend\app\exports\service.py:467:                    except Exception as e:
+  backend\app\exports\service.py:468:                        logger.warning("Dynamic gameplay/person2 tracking failed, 
+falling back to static crop: %s", e)
+> backend\app\exports\service.py:469:                        gameplay_tracks = None
+  backend\app\exports\service.py:470:
+> backend\app\exports\service.py:471:            framing, out_w, out_h = build_filter_complex(
+  backend\app\exports\service.py:472:                request.framing_config, src_w, src_h,
+  backend\app\exports\service.py:473:                ass_path=ass_burn_filename,
+> backend\app\exports\service.py:474:                facecam_tracks=facecam_tracks,
+> backend\app\exports\service.py:475:                gameplay_tracks=gameplay_tracks,
+  backend\app\exports\service.py:476:                watermark_input_index=len(base_segments),
+  backend\app\exports\service.py:477:            )
+  backend\app\exports\service.py:478:            watermark = request.framing_config.watermark
+  backend\app\exports\service.py:479:            progress_duration = sum(right - left for left, right in kept)
+  backend\app\exports\service.py:480:
+  backend\app\exports\service.py:501:                    first_15_ass = "    (no captions burned)"
+  backend\app\exports\service.py:502:
+  backend\app\exports\service.py:503:                cmd_str = " ".join(command)
+> backend\app\exports\service.py:504:                print(f"\n[CLIPFORGE EXPORT FFMPEG COMMAND]\n{cmd_str}\n", 
+flush=True)
+  backend\app\exports\service.py:505:                debug_log = (
+  backend\app\exports\service.py:506:                    f"\n{'='*75}\n"
+  backend\app\exports\service.py:507:                    f"[CLIPFORGE EXPORT DEBUG]\n"
+  backend\app\exports\service.py:508:                    f"  Job ID:           {job_id}\n"
+  backend\app\exports\service.py:509:                    f"  Clip:             {clip.title} (idx={index + 1}, 
+{start:.2f}s - {end:.2f}s)\n"
+  backend\app\exports\service.py:518:                    f"  ASS File Preview (First 15 lines):\n{first_15_ass}\n"
+  backend\app\exports\service.py:519:                    f"  Encoder Attempt:  {encoder}\n"
+  backend\app\exports\service.py:520:                    f"  Working Dir (cwd): {output_dir}\n"
+> backend\app\exports\service.py:521:                    f"  FFmpeg Command:\n    {cmd_str}\n"
+  backend\app\exports\service.py:522:                    f"{'='*75}"
+  backend\app\exports\service.py:523:                )
+  backend\app\exports\service.py:524:                print(debug_log, flush=True)
+  backend\app\exports\service.py:525:                logger.info(debug_log)
+  backend\app\exports\service.py:526:
+  backend\app\exports\service.py:532:                    break
+  backend\app\exports\service.py:533:                temp_path.unlink(missing_ok=True)
+  backend\app\exports\service.py:534:                err_preview = stderr[-1500:] if stderr else "(no stderr)"
+> backend\app\exports\service.py:535:                print(f"[FFMPEG WARNING] Encoder {encoder} failed (code 
+{code}):\n{err_preview}", flush=True)
+> backend\app\exports\service.py:536:                logger.warning("FFmpeg encoder %s failed (code %d):\n%s", 
+encoder, code, err_preview)
+  backend\app\exports\service.py:537:                if encoder == "libx264":
+> backend\app\exports\service.py:538:                    print(f"[FFMPEG FATAL ERROR] All encoders failed for clip 
+'{clip.title}'. Stderr:\n{stderr[-2000:]}", flush=True)
+> backend\app\exports\service.py:539:                    raise RuntimeError(f"FFmpeg export failed with NVENC and 
+libx264: {stderr[-2000:]}")
+  backend\app\exports\service.py:540:            if await _cancelled(job_id):
+  backend\app\exports\service.py:541:                temp_path.unlink(missing_ok=True)
+  backend\app\exports\service.py:542:                break
+  backend\app\exports\service.py:543:            if not encoder_used:
+> backend\app\exports\service.py:544:                raise RuntimeError("FFmpeg export did not produce an output file")
+  backend\app\exports\service.py:545:            temp_path.replace(final_path)
+  backend\app\exports\service.py:546:
+  backend\app\exports\service.py:547:            if ass_file_path and ass_file_path.is_file():
+  backend\app\exports\service.py:548:                ass_file_path.unlink(missing_ok=True)
+  backend\app\exports\service.py:549:
+  backend\app\exports\service.py:671:    request.framing_config = await _resolve_framing_config(project_id, 
+request.framing_config)
+  backend\app\exports\service.py:672:    request.caption_config = await _resolve_caption_config(project_id, 
+request.caption_config)
+  backend\app\exports\service.py:673:
+> backend\app\exports\service.py:674:    _, out_w, out_h = build_filter_complex(request.framing_config, src_w, src_h)
+  backend\app\exports\service.py:675:
+  backend\app\exports\service.py:676:    ass_burn_filename = None
+  backend\app\exports\service.py:677:    ass_file_path = None
+  backend\app\exports\service.py:678:    clip_transcript = map_transcript(transcript, kept) if transcript else None
+  backend\app\exports\service.py:679:    if request.burn_captions and clip_transcript and request.caption_config:
+  backend\app\exports\service.py:684:            ass_burn_filename = ass_file.name
+  backend\app\exports\service.py:685:            ass_file_path = ass_file
+  backend\app\exports\service.py:686:
+> backend\app\exports\service.py:687:    facecam_tracks = None
+> backend\app\exports\service.py:688:    gameplay_tracks = None
+  backend\app\exports\service.py:689:    layout = request.framing_config.layout_template
+  backend\app\exports\service.py:690:    mode = request.framing_config.framing_mode
+  backend\app\exports\service.py:691:    is_supported_layout = layout in (
+  backend\app\exports\service.py:692:        "split_vertical", "split_inverted", "pip", "side_by_side_blur",
+  backend\app\exports\service.py:693:        "wide_plus_dual", "fullscreen_crop", "punch_in_zoom", 
+"podcast_active_speaker"
+  backend\app\exports\service.py:697:        or layout in ("podcast_active_speaker", "side_by_side_blur", 
+"wide_plus_dual")
+  backend\app\exports\service.py:698:    )
+  backend\app\exports\service.py:699:
+> backend\app\exports\service.py:700:    if request.framing_config.dynamic_facecam_tracking and is_supported_layout:
+  backend\app\exports\service.py:701:        target_box_1 = request.framing_config.facecam_box or (
+  backend\app\exports\service.py:702:            request.framing_config.gameplay_box if layout in ("fullscreen_crop", 
+"punch_in_zoom") else None
+  backend\app\exports\service.py:703:        )
+  backend\app\exports\service.py:704:        if target_box_1:
+  backend\app\exports\service.py:705:            try:
+> backend\app\exports\service.py:706:                facecam_tracks = await track_facecam_overlay(
+  backend\app\exports\service.py:707:                    video_path, start, end, target_box_1, framing_mode=mode,
+  backend\app\exports\service.py:708:                )
+> backend\app\exports\service.py:709:                logger.info("Dynamic facecam preview tracking emitted %d 
+keyframes", len(facecam_tracks))
+  backend\app\exports\service.py:710:            except Exception as e:
+  backend\app\exports\service.py:711:                logger.warning("Dynamic facecam preview tracking failed: %s", e)
+> backend\app\exports\service.py:712:                facecam_tracks = None
+  backend\app\exports\service.py:713:
+  backend\app\exports\service.py:714:        target_box_2 = request.framing_config.gameplay_box
+  backend\app\exports\service.py:715:        if is_two_person and target_box_2:
+  backend\app\exports\service.py:716:            try:
+> backend\app\exports\service.py:717:                gameplay_tracks = await track_facecam_overlay(
+  backend\app\exports\service.py:718:                    video_path, start, end, target_box_2, framing_mode=mode,
+  backend\app\exports\service.py:719:                )
+> backend\app\exports\service.py:720:                logger.info("Dynamic gameplay/person2 preview tracking emitted %d 
+keyframes", len(gameplay_tracks))
+  backend\app\exports\service.py:721:            except Exception as e:
+  backend\app\exports\service.py:722:                logger.warning("Dynamic gameplay/person2 preview tracking failed: 
+%s", e)
+> backend\app\exports\service.py:723:                gameplay_tracks = None
+  backend\app\exports\service.py:724:
+> backend\app\exports\service.py:725:    framing, out_w, out_h = build_filter_complex(
+  backend\app\exports\service.py:726:        request.framing_config, src_w, src_h,
+  backend\app\exports\service.py:727:        ass_path=ass_burn_filename,
+> backend\app\exports\service.py:728:        facecam_tracks=facecam_tracks,
+> backend\app\exports\service.py:729:        gameplay_tracks=gameplay_tracks,
+  backend\app\exports\service.py:730:        watermark_input_index=1,
+  backend\app\exports\service.py:731:    )
+  backend\app\exports\service.py:732:    watermark = request.framing_config.watermark
+  backend\app\exports\service.py:733:    output = output_dir / f"preview_{uuid.uuid4().hex}.mp4"
+  backend\app\exports\service.py:734:    temp = output.with_name(output.stem + ".partial.mp4")
+  backend\app\exports\service.py:751:                first_15_ass = "    (no captions burned)"
+  backend\app\exports\service.py:752:
+  backend\app\exports\service.py:753:            cmd_str = " ".join(command)
+> backend\app\exports\service.py:754:            print(f"\n[CLIPFORGE PREVIEW FFMPEG COMMAND]\n{cmd_str}\n", 
+flush=True)
+  backend\app\exports\service.py:755:            debug_log = (
+  backend\app\exports\service.py:756:                f"\n{'='*75}\n"
+  backend\app\exports\service.py:757:                f"[CLIPFORGE PREVIEW DEBUG]\n"
+  backend\app\exports\service.py:758:                f"  Preview ID:       {preview_id}\n"
+  backend\app\exports\service.py:759:                f"  Bounds:           {start:.2f}s - {end:.2f}s\n"
+  backend\app\exports\service.py:767:                f"  Caption Preset:   {request.caption_config.preset if 
+request.caption_config else 'none'}\n"
+  backend\app\exports\service.py:768:                f"  ASS File Preview (First 15 lines):\n{first_15_ass}\n"
+  backend\app\exports\service.py:769:                f"  Working Dir (cwd): {output_dir}\n"
+> backend\app\exports\service.py:770:                f"  FFmpeg Command:\n    {cmd_str}\n"
+  backend\app\exports\service.py:771:                f"{'='*75}"
+  backend\app\exports\service.py:772:            )
+  backend\app\exports\service.py:773:            print(debug_log, flush=True)
+  backend\app\exports\service.py:774:            logger.info(debug_log)
+  backend\app\exports\service.py:775:
+  backend\app\exports\service.py:779:                return output
+  backend\app\exports\service.py:780:            temp.unlink(missing_ok=True)
+  backend\app\exports\service.py:781:            err_preview = error_text[-1500:] if error_text else "(no stderr)"
+> backend\app\exports\service.py:782:            print(f"[FFMPEG PREVIEW WARNING] Encoder {encoder} failed (code 
+{code}):\n{err_preview}", flush=True)
+> backend\app\exports\service.py:783:            logger.warning("FFmpeg preview encoder %s failed (code %d):\n%s", 
+encoder, code, err_preview)
+> backend\app\exports\service.py:784:        print(f"[FFMPEG PREVIEW FATAL ERROR] Preview render 
+failed:\n{error_text[-2000:]}", flush=True)
+> backend\app\exports\service.py:785:        raise RuntimeError(f"FFmpeg preview failed with NVENC and libx264: 
+{error_text[-2000:]}")
+  backend\app\exports\service.py:786:    finally:
+  backend\app\exports\service.py:787:        await ProcessManager.cancel_project(preview_id)
+  backend\app\exports\service.py:788:        temp.unlink(missing_ok=True)
+  backend\app\exports\service.py:789:        if ass_file_path:
+  backend\app\exports\service.py:790:            ass_file_path.unlink(missing_ok=True)
+
+
+

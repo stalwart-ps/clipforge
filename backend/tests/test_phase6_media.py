@@ -20,8 +20,8 @@ class Phase6MediaTests(unittest.TestCase):
             "[0:v]scale=1080:1920[vout]", 10.0, 16.0,
             [(10.0, 12.0), (14.0, 16.0)], normalize=True,
         )
-        self.assertIn("[0:v]trim=start=10.000000:end=12.000000", graph)
-        self.assertIn("[0:a]atrim=start=10.000000:end=12.000000", graph)
+        self.assertIn("[0:v]trim=start=0.000000:end=2.000000", graph)
+        self.assertIn("[0:a]atrim=start=0.000000:end=2.000000", graph)
         self.assertIn("concat=n=2:v=1:a=0[srcv]", graph)
         self.assertIn("concat=n=2:v=0:a=1[srca_raw]", graph)
         self.assertIn("loudnorm=I=-14:TP=-1.5:LRA=11", graph)

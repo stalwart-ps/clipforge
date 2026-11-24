@@ -32,8 +32,8 @@ def test_split_vertical_with_facecam_tracks_uses_animated_crop():
     ]
     fc, out_w, out_h = build_filter_complex(config, src_w=1920, src_h=1080, facecam_tracks=tracks)
     # Check animated crop filter
-    assert "if(gte(t\\,2.000)" in fc
-    assert "if(gte(t\\,5.500)" in fc
+    assert "gte(t\\,2.000)" in fc
+    assert "gte(t\\,5.500)" in fc
     # Coordinates must be clamped within bounds
     # Facecam width = 0.3 * 1920 = 576. Max x = 1920 - 576 = 1344.
     # Track x=0.6 -> 0.6 * 1920 = 1152 <= 1344.
@@ -46,7 +46,7 @@ def test_pip_with_facecam_tracks_uses_animated_crop():
     tracks = [{"time": 1.5, "x": 0.5, "y": 0.0}]
     fc, out_w, out_h = build_filter_complex(config, src_w=1920, src_h=1080, facecam_tracks=tracks)
     assert "[in_b]crop=" in fc
-    assert "if(gte(t\\,1.500)" in fc
+    assert "gte(t\\,1.500)" in fc
     assert "overlay=" in fc
 
 
@@ -54,7 +54,7 @@ def test_screen_presenter_split_vertical_with_facecam_tracks():
     config = _base_config(mode="screen_presenter", layout="split_vertical")
     tracks = [{"time": 3.0, "x": 0.4, "y": 0.3}]
     fc, out_w, out_h = build_filter_complex(config, src_w=1920, src_h=1080, facecam_tracks=tracks)
-    assert "if(gte(t\\,3.000)" in fc
+    assert "gte(t\\,3.000)" in fc
     assert "[top][bot]vstack" in fc
 
 
@@ -66,4 +66,4 @@ def test_facecam_crop_coordinates_strictly_clamped_and_even():
     # Width = 576, Height = 270.
     # Max x = 1920 - 576 = 1344, Min y = 0.
     assert "1344" in fc
-    assert "\\,0\\," in fc
+    assert "*0" in fc

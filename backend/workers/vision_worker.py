@@ -15,67 +15,108 @@ import sys
 from pathlib import Path
 
 
-def _expand_face_box(face: dict, mode: str, tightness: str = "medium") -> dict:
+def _expand_gaming_facecam(face: dict, mode: str, tightness: str = "medium") -> dict:
     fx = float(face["x"])
     fy = float(face["y"])
     fw = float(face["w"])
     fh = float(face["h"])
 
-    mult = 0.75 if tightness == "close" else (1.25 if tightness == "wide" else 1.0)
+    mult = 0.85 if tightness == "close" else (1.15 if tightness == "wide" else 1.0)
+    w_mult = 2.8 * mult
+    headroom_mult = 0.8 * mult
+    torso_mult = 1.8 * mult
 
-    if mode in ("podcast", "talking_head", "reaction"):
-        # Expand horizontally to ~3.4 * fw centered on face
-        w_mult = 3.4 * mult
-        headroom_mult = 1.15 * mult
-        torso_mult = 3.6 * mult
+    new_w = min(0.35, max(0.20, fw * w_mult))
+    new_h = min(0.32, max(0.18, fh * (1.0 + headroom_mult + torso_mult)))
+    cx = fx + fw / 2.0
+    cy = fy + fh / 2.0
 
-        new_w = min(1.0, max(0.05, fw * w_mult))
-        cx = fx + fw / 2.0
+    # Anchor towards nearest corner/edge
+    if cx < 0.35:
+        new_x = max(0.0, min(fx - 0.2 * new_w, 1.0 - new_w))
+    elif cx > 0.65:
+        new_x = max(0.0, min(1.0 - new_w, fx + fw + 0.2 * new_w - new_w))
+    else:
         new_x = max(0.0, min(1.0 - new_w, cx - new_w / 2.0))
 
-        top = fy - headroom_mult * fh
-        bot = (fy + fh) + torso_mult * fh
-        new_y = max(0.0, top)
-        new_h = min(1.0 - new_y, max(0.05, bot - new_y))
-
-        return {
-            "x": round(new_x, 4),
-            "y": round(new_y, 4),
-            "w": round(new_w, 4),
-            "h": round(new_h, 4),
-        }
+    if cy < 0.35:
+        new_y = max(0.0, min(fy - headroom_mult * fh, 1.0 - new_h))
+    elif cy > 0.65:
+        new_y = max(0.0, min(1.0 - new_h, (fy + fh + torso_mult * fh) - new_h))
     else:
-        # Gaming / Screen-Presenter webcam crop
-        w_mult = 2.8 * mult
-        headroom_mult = 0.8 * mult
-        torso_mult = 1.8 * mult
+        new_y = max(0.0, min(1.0 - new_h, fy - headroom_mult * fh))
 
-        new_w = min(1.0, max(0.05, fw * w_mult))
-        new_h = min(1.0, max(0.05, fh * (1.0 + headroom_mult + torso_mult)))
-        cx = fx + fw / 2.0
-        cy = fy + fh / 2.0
+    return {
+        "x": round(new_x, 4),
+        "y": round(new_y, 4),
+        "w": round(new_w, 4),
+        "h": round(new_h, 4),
+    }
 
-        # Anchor towards nearest corner/edge
-        if cx < 0.35:
-            new_x = max(0.0, min(fx - 0.2 * new_w, 1.0 - new_w))
-        elif cx > 0.65:
-            new_x = max(0.0, min(1.0 - new_w, fx + fw + 0.2 * new_w - new_w))
-        else:
-            new_x = max(0.0, min(1.0 - new_w, cx - new_w / 2.0))
 
-        if cy < 0.35:
-            new_y = max(0.0, min(fy - headroom_mult * fh, 1.0 - new_h))
-        elif cy > 0.65:
-            new_y = max(0.0, min(1.0 - new_h, (fy + fh + torso_mult * fh) - new_h))
-        else:
-            new_y = max(0.0, min(1.0 - new_h, fy - headroom_mult * fh))
+def _frame_person_box(
+    face: dict,
+    pane_ar: float,
+    src_ar: float,
+    layout_template: str,
+    tightness: str = "medium",
+) -> dict:
+    fx = float(face["x"])
+    fy = float(face["y"])
+    fw = float(face["w"])
+    fh = float(face["h"])
+    cx = fx + fw / 2.0
+    cy = fy + fh / 2.0
 
-        return {
-            "x": round(new_x, 4),
-            "y": round(new_y, 4),
-            "w": round(new_w, 4),
-            "h": round(new_h, 4),
-        }
+    mult = 0.92 if tightness == "close" else (1.08 if tightness == "wide" else 1.0)
+
+    if layout_template in ("split_vertical", "split_inverted"):
+        # Split vertical / inverted (e.g. 50/50 on 9:16 -> pane_ar ~= 1.125):
+        # Frame each person with a wider, upper-body box matching pane_ar
+        # roughly w ~= 38%-46%, h ~= 58%-68% on 16:9 so Fill mode does NOT zoom in or clip heads
+        h = max(0.58, min(0.68, 0.63 * mult))
+        target_w = h * (pane_ar / src_ar) if src_ar > 0 else 0.42
+        w = max(0.38, min(0.46, target_w))
+
+        headroom = max(0.05, 0.75 * fh * mult)
+        top = fy - headroom
+        if top + h > 1.0:
+            top = max(0.0, 1.0 - h)
+        if top < 0.0:
+            top = 0.0
+
+        new_x = max(0.0, min(1.0 - w, cx - w / 2.0))
+        new_y = top
+    else:
+        # podcast_active_speaker, fullscreen_crop, punch_in_zoom (9:16 portrait -> pane_ar ~= 0.5625)
+        # and side_by_side_blur / wide_plus_dual bottom panes:
+        # keep the portrait framing (w ~= 22%-28%, h ~= 62%-76%)
+        h = max(0.62, min(0.76, 0.69 * mult))
+        target_w = h * (pane_ar / src_ar) if src_ar > 0 else 0.25
+        w = max(0.22, min(0.28, target_w))
+
+        headroom = max(0.04, 0.65 * fh * mult)
+        top = fy - headroom
+        if top + h > 1.0:
+            top = max(0.0, 1.0 - h)
+        if top < 0.0:
+            top = 0.0
+
+        new_x = max(0.0, min(1.0 - w, cx - w / 2.0))
+        new_y = top
+
+    return {
+        "x": round(new_x, 4),
+        "y": round(new_y, 4),
+        "w": round(w, 4),
+        "h": round(h, 4),
+    }
+
+
+def _expand_face_box(face: dict, mode: str, tightness: str = "medium") -> dict:
+    if mode in ("gaming", "screen_presenter"):
+        return _expand_gaming_facecam(face, mode, tightness)
+    return _frame_person_box(face, 1.125, 16.0 / 9.0, "split_vertical", tightness)
 
 
 def detect_regions(
@@ -83,6 +124,9 @@ def detect_regions(
     time_sec: float = 1.0,
     framing_mode: str = "gaming",
     tightness: str = "medium",
+    layout_template: str = "split_vertical",
+    aspect_ratio: str = "9:16",
+    split_ratio: int = 50,
 ) -> dict:
     """
     Open a single frame at time_sec and detect faces using MediaPipe Face Detection.
@@ -97,6 +141,17 @@ def detect_regions(
             "mode_suggestion": str,
         }
     """
+    if not Path(video_path).exists():
+        return {
+            "face_count": 0,
+            "face_confidence": 0.0,
+            "faces": [],
+            "facecam_box": None,
+            "gameplay_box": {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0},
+            "mode_suggestion": framing_mode or "gaming",
+            "message": "Video file does not exist",
+        }
+
     import cv2  # noqa: F401
     import mediapipe as mp  # noqa: F401
 
@@ -161,6 +216,37 @@ def detect_regions(
     face_count = len(faces_data)
     avg_confidence = sum(f["confidence"] for f in faces_data) / face_count if face_count else 0.0
 
+    src_h, src_w = frame.shape[:2]
+    src_ar = src_w / max(1, src_h)
+
+    # Output dimensions per aspect ratio
+    canvas_dims = {
+        "9:16": (1080, 1920),
+        "1:1": (1080, 1080),
+        "16:9": (1920, 1080),
+    }
+    canvas_w, canvas_h = canvas_dims.get(aspect_ratio, (1080, 1920))
+
+    # Compute target pane aspect ratio (pane_ar = pane_w / pane_h)
+    if layout_template in ("split_vertical", "split_inverted"):
+        pane_w = canvas_w
+        ratio = max(10, min(90, split_ratio))
+        pane_h = max(2, int(canvas_h * (ratio / 100)))
+        pane_ar = pane_w / max(1, pane_h)
+    elif layout_template in ("podcast_active_speaker", "fullscreen_crop", "punch_in_zoom"):
+        pane_ar = canvas_w / max(1, canvas_h)
+    elif layout_template == "side_by_side_blur":
+        left_w = (canvas_w // 2) & ~1
+        pane_h = max(2, min(canvas_h, int(left_w * (16 / 9)) & ~1))
+        pane_ar = left_w / max(1, pane_h)
+    elif layout_template == "wide_plus_dual":
+        top_h = 690 if (canvas_w, canvas_h) == (1080, 1920) else max(2, int(canvas_h * 0.36) & ~1)
+        bot_h = canvas_h - top_h
+        pane_w = (canvas_w // 2) & ~1
+        pane_ar = pane_w / max(1, bot_h)
+    else:
+        pane_ar = canvas_w / max(1, canvas_h)
+
     # -------------------------------------------------------------------------
     # Mode-aware Smart Person / Torso Expansion
     # -------------------------------------------------------------------------
@@ -178,45 +264,56 @@ def detect_regions(
             # Sort left-to-right by horizontal position
             faces_sorted = sorted(faces_data, key=lambda f: f["x"])
             f1, f2 = faces_sorted[0], faces_sorted[1]
-            b1 = _expand_face_box(f1, "podcast", tightness)
-            b2 = _expand_face_box(f2, "podcast", tightness)
+            b1 = _frame_person_box(f1, pane_ar, src_ar, layout_template, tightness)
+            b2 = _frame_person_box(f2, pane_ar, src_ar, layout_template, tightness)
 
-            # Prevent heavy horizontal overlap if they sit close together
-            if b1["x"] + b1["w"] > b2["x"]:
-                f1_cx = f1["x"] + f1["w"] / 2.0
-                f2_cx = f2["x"] + f2["w"] / 2.0
-                mid_x = (f1_cx + f2_cx) / 2.0
-                b1["w"] = max(0.08, min(b1["w"], round(mid_x - b1["x"], 4)))
-                b2_w = b2["w"]
-                b2["x"] = round(max(mid_x, b2["x"]), 4)
-                b2["w"] = max(0.08, min(round(1.0 - b2["x"], 4), b2_w))
+            # Prevent heavy horizontal overlap and respect midpoint separation
+            f1_cx = f1["x"] + f1["w"] / 2.0
+            f2_cx = f2["x"] + f2["w"] / 2.0
+            mid_x = (f1_cx + f2_cx) / 2.0
+
+            if b1["x"] + b1["w"] > mid_x:
+                shift = (b1["x"] + b1["w"]) - mid_x
+                b1["x"] = max(0.0, round(b1["x"] - shift, 4))
+                if b1["x"] + b1["w"] > mid_x:
+                    b1["w"] = max(0.12, round(mid_x - b1["x"], 4))
+
+            if b2["x"] < mid_x:
+                shift = mid_x - b2["x"]
+                b2["x"] = min(round(1.0 - b2["w"], 4), round(b2["x"] + shift, 4))
+                if b2["x"] < mid_x:
+                    b2["x"] = round(mid_x, 4)
+                    b2["w"] = max(0.12, min(round(1.0 - b2["x"], 4), b2["w"]))
 
             facecam_box = b1  # Person 1
             gameplay_box = b2  # Person 2
         else:
-            facecam_box = _expand_face_box(faces_data[0], "podcast", tightness)
+            facecam_box = _frame_person_box(faces_data[0], pane_ar, src_ar, layout_template, tightness)
             gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
     elif framing_mode == "talking_head":
         mode_suggestion = "talking_head"
         f = max(faces_data, key=lambda f: f["w"] * f["h"])
-        facecam_box = _expand_face_box(f, "talking_head", tightness)
+        facecam_box = _frame_person_box(f, pane_ar, src_ar, layout_template, tightness)
         gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
     elif framing_mode == "reaction":
         mode_suggestion = "reaction"
         f = max(faces_data, key=lambda f: f["w"] * f["h"])
-        facecam_box = _expand_face_box(f, "reaction", tightness)
+        if layout_template == "pip":
+            facecam_box = _expand_gaming_facecam(f, "reaction", tightness)
+        else:
+            facecam_box = _frame_person_box(f, pane_ar, src_ar, layout_template, tightness)
         gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
     elif framing_mode in ("gaming", "screen_presenter"):
         mode_suggestion = framing_mode
         # Expand detected face into realistic webcam/presenter crop
         # In gaming/presenter, do NOT assign a second face as gameplay.
         f = max(faces_data, key=lambda f: f["confidence"])
-        facecam_box = _expand_face_box(f, framing_mode, tightness)
+        facecam_box = _expand_gaming_facecam(f, framing_mode, tightness)
         gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
     else:
         # Generic fallback
         f = faces_data[0]
-        facecam_box = _expand_face_box(f, "gaming", tightness)
+        facecam_box = _frame_person_box(f, pane_ar, src_ar, layout_template, tightness)
         gameplay_box = {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}
         mode_suggestion = "gaming" if face_count <= 1 else "podcast"
 
@@ -409,18 +506,36 @@ def filter_deadzone_keyframes(
     return keyframes
 
 
+def _select_keyframes(samples: list[dict], max_keyframes: int = 45) -> list[dict]:
+    """Select up to max_keyframes, guaranteeing inclusion of endpoints and camera cuts."""
+    if len(samples) <= max_keyframes:
+        return samples
+
+    keep_indices: set[int] = {0, len(samples) - 1}
+    for idx, s in enumerate(samples):
+        if s.get("cut"):
+            keep_indices.add(idx)
+
+    if len(keep_indices) >= max_keyframes:
+        return [samples[i] for i in sorted(keep_indices)]
+
+    remaining_quota = max_keyframes - len(keep_indices)
+    step = len(samples) / float(remaining_quota + 1)
+    for k in range(1, remaining_quota + 1):
+        idx = min(len(samples) - 1, int(round(k * step)))
+        keep_indices.add(idx)
+
+    return [samples[i] for i in sorted(keep_indices)]
+
+
 def track_facecam(
     video_path: str,
     start_sec: float,
     end_sec: float,
     facecam_box: dict,
+    framing_mode: str = "gaming",
 ) -> dict:
-    """Track facecam overlay moves within [start_sec, end_sec] at 2 FPS.
-
-    Uses MediaPipe FaceDetection (model_selection=1) and HSV histogram correlation
-    (>= 0.35) against the initial facecam boundary/background to reject game characters.
-    Applies deadzone filtering (>0.05 shift, 2 consecutive samples) and caps to 25 keyframes.
-    """
+    """Track facecam overlay within [start_sec, end_sec] at 4 FPS with mode-aware matching and EMA smoothing."""
     import cv2
     import gc
     import mediapipe as mp
@@ -436,7 +551,7 @@ def track_facecam(
         return {"tracks": []}
 
     fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    step = max(1, round(fps / 2.0))  # 2 FPS sampling rate
+    step = max(1, round(fps / 4.0))  # 4 FPS sampling rate
 
     # Direct seek to start_sec via POS_MSEC
     cap.set(cv2.CAP_PROP_POS_MSEC, max(0.0, start_sec) * 1000.0)
@@ -444,10 +559,13 @@ def track_facecam(
     frame_idx = start_frame_idx
 
     ref_hist = None
-    ref_offset_x = fb_w / 2.0
-    ref_offset_y = fb_h / 2.0
-    last_valid_x = fb_x
-    last_valid_y = fb_y
+    ref_offset_x = fb_w * 0.5
+    ref_offset_y = fb_h * 0.28 if fb_h > 0.35 else fb_h * 0.42
+    ref_locked = False
+    last_x = fb_x
+    last_y = fb_y
+    last_cx = fb_x + fb_w / 2.0
+    last_cy = fb_y + fb_h / 2.0
 
     raw_samples: list[dict] = []
     processed_frames = 0
@@ -456,9 +574,9 @@ def track_facecam(
     try:
         with mp_face.FaceDetection(
             model_selection=1,  # Full-range model for far/small faces
-            min_detection_confidence=0.4,
+            min_detection_confidence=0.25,
         ) as detector:
-            while frame_idx / fps < end_sec:
+            while True:
                 # Skip non-sampled frames using grab() to avoid decoding to RAM
                 if (frame_idx - start_frame_idx) % step != 0:
                     if not cap.grab():
@@ -470,8 +588,15 @@ def track_facecam(
                 if not ok or frame is None:
                     break
 
-                t = frame_idx / fps
-                t_rel = max(0.0, t - start_sec)
+                pos_ms = cap.get(cv2.CAP_PROP_POS_MSEC)
+                actual_ts = (pos_ms / 1000.0) if pos_ms > 0 else (frame_idx / fps)
+                if actual_ts >= end_sec:
+                    break
+
+                if pos_ms > 0:
+                    t_rel = max(0.0, round(pos_ms / 1000.0 - start_sec, 3))
+                else:
+                    t_rel = max(0.0, round(frame_idx / fps - start_sec, 3))
 
                 h, w = frame.shape[:2]
                 if w > 640:
@@ -482,7 +607,6 @@ def track_facecam(
 
                 sw_h, sw_w = small_frame.shape[:2]
                 rgb = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
-                hsv = cv2.cvtColor(small_frame, cv2.COLOR_BGR2HSV)
 
                 result = detector.process(rgb)
                 detected_faces = []
@@ -499,73 +623,135 @@ def track_facecam(
                             "score": float(det.score[0]) if det.score else 0.0,
                         })
 
-                # Build reference histogram on first frame where face is detected inside facecam_box
-                if ref_hist is None:
-                    faces_inside = [
-                        f for f in detected_faces
-                        if fb_x <= f["cx"] <= fb_x + fb_w and fb_y <= f["cy"] <= fb_y + fb_h
-                    ]
-                    if faces_inside:
-                        ref_face = max(faces_inside, key=lambda f: f["w"] * f["h"])
-                        ref_offset_x = ref_face["cx"] - fb_x
-                        ref_offset_y = ref_face["cy"] - fb_y
+                if framing_mode == "gaming":
+                    hsv = cv2.cvtColor(small_frame, cv2.COLOR_BGR2HSV)
+                    # Build reference histogram on first frame where face is detected inside facecam_box
+                    if ref_hist is None:
+                        faces_inside = [
+                            f for f in detected_faces
+                            if fb_x <= f["cx"] <= fb_x + fb_w and fb_y <= f["cy"] <= fb_y + fb_h
+                        ]
+                        if faces_inside:
+                            ref_face = max(faces_inside, key=lambda f: f["w"] * f["h"])
+                            ref_offset_x = ref_face["cx"] - fb_x
+                            ref_offset_y = ref_face["cy"] - fb_y
+                            ref_locked = True
 
-                        px1 = max(0, min(sw_w - 1, int(fb_x * sw_w)))
-                        py1 = max(0, min(sw_h - 1, int(fb_y * sw_h)))
-                        px2 = max(px1 + 1, min(sw_w, int((fb_x + fb_w) * sw_w)))
-                        py2 = max(py1 + 1, min(sw_h, int((fb_y + fb_h) * sw_h)))
+                            px1 = max(0, min(sw_w - 1, int(fb_x * sw_w)))
+                            py1 = max(0, min(sw_h - 1, int(fb_y * sw_h)))
+                            px2 = max(px1 + 1, min(sw_w, int((fb_x + fb_w) * sw_w)))
+                            py2 = max(py1 + 1, min(sw_h, int((fb_y + fb_h) * sw_h)))
 
-                        roi_hsv = hsv[py1:py2, px1:px2]
-                        mask = np.ones((py2 - py1, px2 - px1), dtype=np.uint8) * 255
+                            roi_hsv = hsv[py1:py2, px1:px2]
+                            mask = np.ones((py2 - py1, px2 - px1), dtype=np.uint8) * 255
 
-                        # Exclude center face region from reference histogram
-                        f_px1 = max(0, min(px2 - px1, int((ref_face["x"] - fb_x) * sw_w)))
-                        f_py1 = max(0, min(py2 - py1, int((ref_face["y"] - fb_y) * sw_h)))
-                        f_px2 = max(0, min(px2 - px1, int((ref_face["x"] + ref_face["w"] - fb_x) * sw_w)))
-                        f_py2 = max(0, min(py2 - py1, int((ref_face["y"] + ref_face["h"] - fb_y) * sw_h)))
-                        mask[f_py1:f_py2, f_px1:f_px2] = 0
+                            # Exclude center face region from reference histogram
+                            f_px1 = max(0, min(px2 - px1, int((ref_face["x"] - fb_x) * sw_w)))
+                            f_py1 = max(0, min(py2 - py1, int((ref_face["y"] - fb_y) * sw_h)))
+                            f_px2 = max(0, min(px2 - px1, int((ref_face["x"] + ref_face["w"] - fb_x) * sw_w)))
+                            f_py2 = max(0, min(py2 - py1, int((ref_face["y"] + ref_face["h"] - fb_y) * sw_h)))
+                            mask[f_py1:f_py2, f_px1:f_px2] = 0
 
-                        hist = cv2.calcHist([roi_hsv], [0, 1], mask, [30, 32], [0, 180, 0, 256])
-                        cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
-                        ref_hist = hist
-                        last_valid_x, last_valid_y = fb_x, fb_y
+                            hist = cv2.calcHist([roi_hsv], [0, 1], mask, [30, 32], [0, 180, 0, 256])
+                            cv2.normalize(hist, hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+                            ref_hist = hist
+                        target_x, target_y = fb_x, fb_y
+                    else:
+                        # Match candidate faces against reference HSV histogram (correlation >= 0.30)
+                        best_match = None
+                        best_score = -1.0
 
-                    raw_samples.append({"time": t_rel, "x": last_valid_x, "y": last_valid_y})
+                        for cand in detected_faces:
+                            cand_x = max(0.0, min(1.0 - fb_w, cand["cx"] - ref_offset_x))
+                            cand_y = max(0.0, min(1.0 - fb_h, cand["cy"] - ref_offset_y))
+
+                            c_px1 = max(0, min(sw_w - 1, int(cand_x * sw_w)))
+                            c_py1 = max(0, min(sw_h - 1, int(cand_y * sw_h)))
+                            c_px2 = max(c_px1 + 1, min(sw_w, int((cand_x + fb_w) * sw_w)))
+                            c_py2 = max(c_py1 + 1, min(sw_h, int((cand_y + fb_h) * sw_h)))
+
+                            c_roi_hsv = hsv[c_py1:c_py2, c_px1:c_px2]
+                            c_mask = np.ones((c_py2 - c_py1, c_px2 - c_px1), dtype=np.uint8) * 255
+
+                            cf_px1 = max(0, min(c_px2 - c_px1, int((cand["x"] - cand_x) * sw_w)))
+                            cf_py1 = max(0, min(c_py2 - c_py1, int((cand["y"] - cand_y) * sw_h)))
+                            cf_px2 = max(0, min(c_px2 - c_px1, int((cand["x"] + cand["w"] - cand_x) * sw_w)))
+                            cf_py2 = max(0, min(c_py2 - c_py1, int((cand["y"] + cand["h"] - cand_y) * sw_h)))
+                            c_mask[cf_py1:cf_py2, cf_px1:cf_px2] = 0
+
+                            c_hist = cv2.calcHist([c_roi_hsv], [0, 1], c_mask, [30, 32], [0, 180, 0, 256])
+                            cv2.normalize(c_hist, c_hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
+                            sim = cv2.compareHist(ref_hist, c_hist, cv2.HISTCMP_CORREL)
+
+                            if sim >= 0.30 and sim > best_score:
+                                best_score = sim
+                                best_match = (cand_x, cand_y)
+
+                        if best_match is not None:
+                            target_x, target_y = best_match
+                        else:
+                            target_x, target_y = last_x, last_y
                 else:
-                    # Match candidate faces against reference HSV histogram
-                    best_match = None
-                    best_score = -1.0
+                    # Podcast / Talking Head / Reaction / Screen-Presenter:
+                    # Spatial proximity / left-vs-right matching without gaming HSV rejection
+                    if not ref_locked:
+                        faces_inside = [
+                            f for f in detected_faces
+                            if fb_x <= f["cx"] <= fb_x + fb_w and fb_y <= f["cy"] <= fb_y + fb_h
+                        ]
+                        if faces_inside:
+                            ref_face = max(faces_inside, key=lambda f: f["w"] * f["h"])
+                            ref_offset_x = ref_face["cx"] - fb_x
+                            ref_offset_y = ref_face["cy"] - fb_y
+                            ref_locked = True
 
-                    for cand in detected_faces:
-                        cand_x = max(0.0, min(1.0 - fb_w, cand["cx"] - ref_offset_x))
-                        cand_y = max(0.0, min(1.0 - fb_h, cand["cy"] - ref_offset_y))
+                    if not detected_faces:
+                        target_x, target_y = last_x, last_y
+                    elif len(detected_faces) == 1:
+                        f = detected_faces[0]
+                        target_x = max(0.0, min(1.0 - fb_w, f["cx"] - ref_offset_x))
+                        target_y = max(0.0, min(1.0 - fb_h, f["cy"] - ref_offset_y))
+                    else:
+                        init_cx = fb_x + fb_w / 2.0
+                        if init_cx < 0.45:
+                            same_side = [f for f in detected_faces if f["cx"] <= 0.55]
+                            pool = same_side if same_side else detected_faces
+                        elif init_cx > 0.55:
+                            same_side = [f for f in detected_faces if f["cx"] >= 0.45]
+                            pool = same_side if same_side else detected_faces
+                        else:
+                            pool = detected_faces
 
-                        c_px1 = max(0, min(sw_w - 1, int(cand_x * sw_w)))
-                        c_py1 = max(0, min(sw_h - 1, int(cand_y * sw_h)))
-                        c_px2 = max(c_px1 + 1, min(sw_w, int((cand_x + fb_w) * sw_w)))
-                        c_py2 = max(c_py1 + 1, min(sw_h, int((cand_y + fb_h) * sw_h)))
+                        best_face = min(pool, key=lambda f: (f["cx"] - last_cx)**2 + (f["cy"] - last_cy)**2)
+                        target_x = max(0.0, min(1.0 - fb_w, best_face["cx"] - ref_offset_x))
+                        target_y = max(0.0, min(1.0 - fb_h, best_face["cy"] - ref_offset_y))
 
-                        c_roi_hsv = hsv[c_py1:c_py2, c_px1:c_px2]
-                        c_mask = np.ones((c_py2 - c_py1, c_px2 - c_px1), dtype=np.uint8) * 255
+                shift_x = abs(target_x - last_x)
+                shift_y = abs(target_y - last_y)
 
-                        cf_px1 = max(0, min(c_px2 - c_px1, int((cand["x"] - cand_x) * sw_w)))
-                        cf_py1 = max(0, min(c_py2 - c_py1, int((cand["y"] - cand_y) * sw_h)))
-                        cf_px2 = max(0, min(c_px2 - c_px1, int((cand["x"] + cand["w"] - cand_x) * sw_w)))
-                        cf_py2 = max(0, min(c_py2 - c_py1, int((cand["y"] + cand["h"] - cand_y) * sw_h)))
-                        c_mask[cf_py1:cf_py2, cf_px1:cf_px2] = 0
+                if shift_x > 0.18 or shift_y > 0.18:
+                    # Camera cut: snap immediately without lag
+                    curr_x = target_x
+                    curr_y = target_y
+                    is_cut = True
+                else:
+                    # Smooth normal motion with EMA (alpha = 0.35)
+                    alpha = 0.35
+                    curr_x = (1.0 - alpha) * last_x + alpha * target_x
+                    curr_y = (1.0 - alpha) * last_y + alpha * target_y
+                    is_cut = False
 
-                        c_hist = cv2.calcHist([c_roi_hsv], [0, 1], c_mask, [30, 32], [0, 180, 0, 256])
-                        cv2.normalize(c_hist, c_hist, alpha=0, beta=1, norm_type=cv2.NORM_MINMAX)
-                        sim = cv2.compareHist(ref_hist, c_hist, cv2.HISTCMP_CORREL)
+                last_x = curr_x
+                last_y = curr_y
+                last_cx = curr_x + fb_w / 2.0
+                last_cy = curr_y + fb_h / 2.0
 
-                        if sim >= 0.35 and sim > best_score:
-                            best_score = sim
-                            best_match = (cand_x, cand_y)
-
-                    if best_match is not None:
-                        last_valid_x, last_valid_y = best_match
-
-                    raw_samples.append({"time": t_rel, "x": last_valid_x, "y": last_valid_y})
+                raw_samples.append({
+                    "time": t_rel,
+                    "x": round(curr_x, 4),
+                    "y": round(curr_y, 4),
+                    "cut": is_cut,
+                })
 
                 processed_frames += 1
                 if processed_frames % 100 == 0:
@@ -576,7 +762,7 @@ def track_facecam(
         cap.release()
         gc.collect()
 
-    keyframes = filter_deadzone_keyframes(raw_samples, facecam_box, deadzone=0.05, min_consecutive=2, max_keyframes=25)
+    keyframes = _select_keyframes(raw_samples, max_keyframes=45)
     return {"tracks": keyframes}
 
 
@@ -591,12 +777,21 @@ def main():
     parser.add_argument("--facecam-box", type=str, default=None)
     parser.add_argument("--framing-mode", type=str, default="gaming")
     parser.add_argument("--tightness", type=str, default="medium")
+    parser.add_argument("--layout-template", type=str, default="split_vertical")
+    parser.add_argument("--aspect-ratio", type=str, default="9:16")
+    parser.add_argument("--split-ratio", type=int, default=50)
     args = parser.parse_args()
 
     try:
         if args.track_facecam and args.track_start is not None and args.track_end is not None:
             fb = json.loads(args.facecam_box) if args.facecam_box else {"x": 0.0, "y": 0.0, "w": 0.3, "h": 0.25}
-            result = track_facecam(args.video_path, args.track_start, args.track_end, fb)
+            result = track_facecam(
+                args.video_path,
+                args.track_start,
+                args.track_end,
+                fb,
+                framing_mode=args.framing_mode,
+            )
         elif args.track_start is not None and args.track_end is not None:
             result = detect_active_speaker_tracks(args.video_path, args.track_start, args.track_end)
         else:
@@ -605,6 +800,9 @@ def main():
                 args.time_sec,
                 framing_mode=args.framing_mode,
                 tightness=args.tightness,
+                layout_template=args.layout_template,
+                aspect_ratio=args.aspect_ratio,
+                split_ratio=args.split_ratio,
             )
     except Exception as e:
         result = {

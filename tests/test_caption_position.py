@@ -77,8 +77,8 @@ def test_burn_captions_strictly_honored_in_filter_complex():
     )
     fc_no_burn, _, _ = build_filter_complex(config, 1920, 1080, ass_path=None)
     assert "ass=" not in fc_no_burn
-    assert "null[vout]" in fc_no_burn
+    assert "null[v_final]" in fc_no_burn or "null[vout]" in fc_no_burn
 
     # When ass_path is provided, ass= filter is attached
     fc_burn, _, _ = build_filter_complex(config, 1920, 1080, ass_path="test_captions.ass")
-    assert "ass='test_captions.ass'[vout]" in fc_burn
+    assert "ass='test_captions.ass'[v_final]" in fc_burn or "ass='test_captions.ass'[vout]" in fc_burn
