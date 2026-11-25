@@ -81,3 +81,8 @@ clipforge_*_diag.txt
 *.swo
 .DS_Store
 Thumbs.db
+
+.agents/
+skills-lock.json
+clipforge_diag*.txt
+debug_output.txt
