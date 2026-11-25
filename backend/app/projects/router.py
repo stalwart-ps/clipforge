@@ -22,8 +22,11 @@ from app.core.ws_manager import ws_manager
 from app.projects.schemas import (
     CancelJobResponse,
     CandidateClip,
+    DeleteProjectResponse,
     DiscoverClipsRequest,
     IngestUrlRequest,
+    ProjectCleanupRequest,
+    ProjectCleanupResponse,
     ProjectRead,
     ProjectSummary,
     TranscribeRequest,
@@ -60,12 +63,36 @@ async def list_projects(session: AsyncSession = Depends(get_db_session)) -> list
     return await ProjectService.list_projects(session)
 
 
+@router.post("/cleanup", response_model=ProjectCleanupResponse, status_code=status.HTTP_200_OK)
+async def cleanup_projects(
+    payload: ProjectCleanupRequest | None = None,
+    session: AsyncSession = Depends(get_db_session),
+) -> ProjectCleanupResponse:
+    """Cascade-delete missing-on-disk and cancelled/failed projects and clean up cache."""
+    req = payload or ProjectCleanupRequest()
+    result = await ProjectService.cleanup_projects(
+        session,
+        remove_missing=req.remove_missing,
+        remove_cancelled=req.remove_cancelled,
+    )
+    return ProjectCleanupResponse(**result)
+
+
 @router.get("/{project_id}", response_model=ProjectRead, status_code=status.HTTP_200_OK)
 async def get_project(
     project_id: str, session: AsyncSession = Depends(get_db_session)
 ) -> ProjectRead:
     """Get project details, media paths, and extracted engagement signals."""
     return await ProjectService.get_project(session, project_id)
+
+
+@router.delete("/{project_id}", response_model=DeleteProjectResponse, status_code=status.HTTP_200_OK)
+async def delete_project(
+    project_id: str, session: AsyncSession = Depends(get_db_session)
+) -> DeleteProjectResponse:
+    """Cascade delete a project, child SQLite rows, and cache directories."""
+    result = await ProjectService.delete_project(session, project_id)
+    return DeleteProjectResponse(**result)
 
 
 @router.post("/{project_id}/cancel", response_model=CancelJobResponse, status_code=status.HTTP_200_OK)

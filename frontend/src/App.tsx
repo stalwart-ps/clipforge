@@ -104,7 +104,7 @@ export const App: React.FC = () => {
         ) : activeTab === 'exports' ? (
           <ExportWorkbench />
         ) : (
-          <StudioWorkbench />
+          <StudioWorkbench diagnostics={diagnostics} settings={settings} />
         )}
       </main>
     </div>

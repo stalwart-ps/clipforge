@@ -104,6 +104,25 @@ export const api = {
     return handleResponse<ProjectRead>(res);
   },
 
+  async deleteProject(projectId: string): Promise<{ deleted: boolean; projectId: string }> {
+    const res = await fetch(`${BASE_URL}/api/projects/${projectId}`, {
+      method: 'DELETE',
+    });
+    return handleResponse<{ deleted: boolean; projectId: string }>(res);
+  },
+
+  async cleanupProjects(payload: { removeMissing?: boolean; removeCancelled?: boolean } = { removeMissing: true, removeCancelled: true }): Promise<{ removedCount: number; removedIds: string[] }> {
+    const res = await fetch(`${BASE_URL}/api/projects/cleanup`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        remove_missing: payload.removeMissing ?? true,
+        remove_cancelled: payload.removeCancelled ?? true,
+      }),
+    });
+    return handleResponse<{ removedCount: number; removedIds: string[] }>(res);
+  },
+
   async cancelProject(projectId: string): Promise<{ success: boolean; message: string }> {
     const res = await fetch(`${BASE_URL}/api/projects/${projectId}/cancel`, {
       method: 'POST',

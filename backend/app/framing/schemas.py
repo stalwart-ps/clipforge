@@ -65,6 +65,8 @@ class FramingConfig(APISchema):
 
     # Dynamic Facecam Tracking (Auto-Follow Overlay Moves)
     dynamic_facecam_tracking: bool = False
+    gaming_tracking_mode: str = "overlay_lock"
+    reference_time_sec: float = 5.0
 
 
 # ---------------------------------------------------------------------------
@@ -83,6 +85,8 @@ class ProfileCreate(APISchema):
     ollama_prompt: str | None = None
     caption_style: str = "hormozi_pop"
     dynamic_facecam_tracking: bool = False
+    gaming_tracking_mode: str = "overlay_lock"
+    reference_time_sec: float = 5.0
 
 
 class ProfileUpdate(APISchema):
@@ -98,6 +102,8 @@ class ProfileUpdate(APISchema):
     ollama_prompt: str | None = None
     caption_style: str | None = None
     dynamic_facecam_tracking: bool | None = None
+    gaming_tracking_mode: str | None = None
+    reference_time_sec: float | None = None
 
 
 class ProfileRead(APISchema):
@@ -114,6 +120,8 @@ class ProfileRead(APISchema):
     ollama_prompt: str | None = None
     caption_style: str
     dynamic_facecam_tracking: bool = False
+    gaming_tracking_mode: str = "overlay_lock"
+    reference_time_sec: float = 5.0
     created_at: str
     updated_at: str
 

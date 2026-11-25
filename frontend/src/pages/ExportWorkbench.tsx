@@ -325,6 +325,10 @@ export const ExportWorkbench: React.FC = () => {
               const dft = typeof lc.dynamicFacecamTracking === 'boolean'
                 ? lc.dynamicFacecamTracking
                 : (typeof lc.dynamic_facecam_tracking === 'boolean' ? lc.dynamic_facecam_tracking : undefined);
+              const gtm = lc.gamingTrackingMode || lc.gaming_tracking_mode;
+              const rts = typeof lc.referenceTimeSec === 'number'
+                ? lc.referenceTimeSec
+                : (typeof lc.reference_time_sec === 'number' ? lc.reference_time_sec : undefined);
 
               next.framingConfig = {
                 ...prev.framingConfig,
@@ -336,6 +340,8 @@ export const ExportWorkbench: React.FC = () => {
                 ...(fBox ? { facecamBox: fBox } : {}),
                 ...(gBox ? { gameplayBox: gBox } : {}),
                 ...(dft !== undefined ? { dynamicFacecamTracking: dft } : {}),
+                ...(gtm ? { gamingTrackingMode: gtm } : {}),
+                ...(rts !== undefined ? { referenceTimeSec: rts } : {}),
               };
             }
             if (wsConfig.captionConfig && Object.keys(wsConfig.captionConfig).length > 0) {

@@ -8,6 +8,7 @@ Never imported at FastAPI startup.
 
 Outputs single line:  RESULT:{json}
 """
+import numpy as np
 
 import argparse
 import json
@@ -153,30 +154,22 @@ def detect_regions(
         }
 
     import cv2  # noqa: F401
-    import mediapipe as mp  # noqa: F401
 
-    cap = cv2.VideoCapture(video_path)
-    if not cap.isOpened():
-        return {
-            "face_count": 0,
-            "face_confidence": 0.0,
-            "faces": [],
-            "facecam_box": None,
-            "gameplay_box": None,
-            "mode_suggestion": "gaming",
-            "message": "Could not open video file",
-        }
+    def _read_frame(t: float) -> tuple[np.ndarray | None, float, float]:
+        cap = cv2.VideoCapture(video_path)
+        if not cap.isOpened():
+            return None, 30.0, 0.0
+        fps_val = cap.get(cv2.CAP_PROP_FPS) or 30.0
+        total_f = cap.get(cv2.CAP_PROP_FRAME_COUNT) or 0.0
+        dur = total_f / max(1.0, fps_val)
+        idx = min(int(round(t * fps_val)), max(0, int(total_f) - 1)) if total_f > 0 else int(round(t * fps_val))
+        cap.set(cv2.CAP_PROP_POS_FRAMES, max(0, idx))
+        r, f = cap.read()
+        cap.release()
+        return (f if r and f is not None else None), fps_val, dur
 
-    # Seek to the requested time
-    fps = cap.get(cv2.CAP_PROP_FPS) or 30.0
-    total_frames = cap.get(cv2.CAP_PROP_FRAME_COUNT)
-    frame_idx = min(int(time_sec * fps), max(0, int(total_frames) - 1))
-    cap.set(cv2.CAP_PROP_POS_FRAMES, frame_idx)
-
-    ret, frame = cap.read()
-    cap.release()
-
-    if not ret or frame is None:
+    frame, fps, duration = _read_frame(time_sec)
+    if frame is None:
         return {
             "face_count": 0,
             "face_confidence": 0.0,
@@ -187,31 +180,149 @@ def detect_regions(
             "message": "Failed to read frame",
         }
 
-    rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+    faces_data: list[dict] = []
 
-    # MediaPipe Face Detection
-    mp_face = mp.solutions.face_detection
-    faces_data = []
+    model_dir = Path(__file__).resolve().parents[1] / "models" / "face"
+    det_model_path = model_dir / "det_10g.onnx"
 
-    with mp_face.FaceDetection(
-        model_selection=1,  # 1 = full range model (better for far faces)
-        min_detection_confidence=0.4,
-    ) as detector:
-        results = detector.process(rgb_frame)
-        if results.detections:
-            for det in results.detections:
-                bbox = det.location_data.relative_bounding_box
-                left = max(0.0, min(1.0, float(bbox.xmin)))
-                top = max(0.0, min(1.0, float(bbox.ymin)))
-                faces_data.append(
-                    {
-                        "x": left,
-                        "y": top,
-                        "w": min(1.0 - left, max(0.001, float(bbox.width))),
-                        "h": min(1.0 - top, max(0.001, float(bbox.height))),
-                        "confidence": float(det.score[0]) if det.score else 0.0,
-                    }
-                )
+    if det_model_path.exists():
+        try:
+            from backend.workers.face_engine import FaceEngine
+        except ImportError:
+            from workers.face_engine import FaceEngine
+
+        def _is_corner_face(f: dict) -> bool:
+            cx = float(f.get("cx", f["x"] + f["w"] / 2.0))
+            cy = float(f.get("cy", f["y"] + f["h"] / 2.0))
+            if (cx <= 0.40 or cx >= 0.60) and (cy <= 0.45 or cy >= 0.55):
+                return True
+            if cx <= 0.35 or cx >= 0.65 or cy <= 0.30 or cy >= 0.70:
+                return True
+            return False
+
+        def _run_quadrant_pass(engine: FaceEngine, img_bgr: np.ndarray) -> list[dict]:
+            img_h, img_w = img_bgr.shape[:2]
+            qw = int(round(img_w * 0.55))
+            qh = int(round(img_h * 0.55))
+            quads = [
+                (0, 0, qw, qh),
+                (img_w - qw, 0, qw, qh),
+                (0, img_h - qh, qw, qh),
+                (img_w - qw, img_h - qh, qw, qh),
+            ]
+            q_faces: list[dict] = []
+            for ox, oy, bw, bh in quads:
+                crop = img_bgr[oy:oy + bh, ox:ox + bw]
+                dets = engine.detect(crop, input_size=(640, 640), score_thresh=0.28, nms_thresh=0.40)
+                for d in dets:
+                    nx = (ox + d["x"] * bw) / img_w
+                    ny = (oy + d["y"] * bh) / img_h
+                    nw = (d["w"] * bw) / img_w
+                    nh = (d["h"] * bh) / img_h
+                    kps_px = [[float(ox + kp[0]), float(oy + kp[1])] for kp in d.get("kps", [])]
+                    q_faces.append({
+                        "x": round(max(0.0, min(1.0, nx)), 4),
+                        "y": round(max(0.0, min(1.0, ny)), 4),
+                        "w": round(max(0.001, min(1.0 - nx, nw)), 4),
+                        "h": round(max(0.001, min(1.0 - ny, nh)), 4),
+                        "cx": round(nx + nw / 2.0, 4),
+                        "cy": round(ny + nh / 2.0, 4),
+                        "confidence": d["confidence"],
+                        "score": d["score"],
+                        "kps": kps_px,
+                    })
+            return q_faces
+
+        def _dedup_faces(flist: list[dict], iou_thresh: float = 0.35) -> list[dict]:
+            if not flist:
+                return []
+            flist_sorted = sorted(flist, key=lambda f: f["confidence"], reverse=True)
+            kept = []
+            for f in flist_sorted:
+                ovr = False
+                for k in kept:
+                    x1 = max(f["x"], k["x"])
+                    y1 = max(f["y"], k["y"])
+                    x2 = min(f["x"] + f["w"], k["x"] + k["w"])
+                    y2 = min(f["y"] + f["h"], k["y"] + k["h"])
+                    inter = max(0.0, x2 - x1) * max(0.0, y2 - y1)
+                    union = (f["w"] * f["h"]) + (k["w"] * k["h"]) - inter
+                    if union > 0 and (inter / union) > iou_thresh:
+                        ovr = True
+                        break
+                if not ovr:
+                    kept.append(f)
+            return kept
+
+        with FaceEngine(load_recognizer=False) as engine:
+            # 1. Full frame at input_size=(960, 960) with score_thresh=0.30
+            raw_dets = engine.detect(frame, input_size=(960, 960), score_thresh=0.30)
+            faces_data = _dedup_faces(raw_dets)
+
+            # 2. If 0 faces (or gaming mode with no corner face), run 4-quadrant corner pass
+            need_quad = (len(faces_data) == 0) or (framing_mode == "gaming" and not any(_is_corner_face(f) for f in faces_data))
+            if need_quad:
+                q_dets = _run_quadrant_pass(engine, frame)
+                if q_dets:
+                    combined = _dedup_faces(q_dets + faces_data)
+                    if framing_mode == "gaming":
+                        corner_f = [f for f in combined if _is_corner_face(f)]
+                        faces_data = corner_f if corner_f else combined
+                    else:
+                        faces_data = combined
+
+            # 3. If still 0, probe nearby timestamps: +2s, -2s, +5s, +10s
+            if len(faces_data) == 0 or (framing_mode == "gaming" and not any(_is_corner_face(f) for f in faces_data)):
+                probe_offsets = [2.0, -2.0, 5.0, 10.0]
+                for off in probe_offsets:
+                    probe_t = time_sec + off
+                    if probe_t < 0.0 or (duration > 0.0 and probe_t > duration):
+                        continue
+                    p_frame, _, _ = _read_frame(probe_t)
+                    if p_frame is None:
+                        continue
+                    p_dets = engine.detect(p_frame, input_size=(960, 960), score_thresh=0.30)
+                    if len(p_dets) == 0 or (framing_mode == "gaming" and not any(_is_corner_face(f) for f in p_dets)):
+                        p_quad = _run_quadrant_pass(engine, p_frame)
+                        if p_quad:
+                            p_dets = _dedup_faces(p_quad + p_dets)
+
+                    if p_dets:
+                        if framing_mode == "gaming":
+                            c_faces = [f for f in p_dets if _is_corner_face(f)]
+                            if c_faces:
+                                faces_data = c_faces
+                                break
+                            elif len(faces_data) == 0:
+                                faces_data = p_dets
+                                break
+                        else:
+                            faces_data = p_dets
+                            break
+    else:
+        # Fallback gracefully to MediaPipe ONLY if det_10g.onnx is missing
+        import mediapipe as mp  # noqa: F401
+        rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        mp_face = mp.solutions.face_detection
+        with mp_face.FaceDetection(
+            model_selection=1,  # 1 = full range model (better for far faces)
+            min_detection_confidence=0.4,
+        ) as detector:
+            results = detector.process(rgb_frame)
+            if results.detections:
+                for det in results.detections:
+                    bbox = det.location_data.relative_bounding_box
+                    left = max(0.0, min(1.0, float(bbox.xmin)))
+                    top = max(0.0, min(1.0, float(bbox.ymin)))
+                    faces_data.append(
+                        {
+                            "x": left,
+                            "y": top,
+                            "w": min(1.0 - left, max(0.001, float(bbox.width))),
+                            "h": min(1.0 - top, max(0.001, float(bbox.height))),
+                            "confidence": float(det.score[0]) if det.score else 0.0,
+                        }
+                    )
 
     face_count = len(faces_data)
     avg_confidence = sum(f["confidence"] for f in faces_data) / face_count if face_count else 0.0

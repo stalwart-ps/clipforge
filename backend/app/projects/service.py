@@ -8,7 +8,7 @@ import shutil
 import sys
 import uuid
 from fastapi import UploadFile
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
@@ -702,6 +702,7 @@ class ProjectService:
                 max_clips=target_max_clips,
                 custom_instructions=payload.custom_prompt or "",
                 allow_multi_segment=payload.allow_multi_segment,
+                auto_duration=payload.auto_duration,
             )
         )
 
@@ -717,6 +718,7 @@ class ProjectService:
         max_clips: int | None,
         custom_instructions: str,
         allow_multi_segment: bool = False,
+        auto_duration: bool = True,
     ):
         try:
             async with async_session_maker() as session:
@@ -769,6 +771,7 @@ class ProjectService:
                 max_clips=max_clips,
                 custom_instructions=custom_instructions,
                 allow_multi_segment=allow_multi_segment,
+                auto_duration=auto_duration,
             )
 
             async with async_session_maker() as session:
@@ -921,6 +924,8 @@ class ProjectService:
                 except Exception:
                     pass
 
+            is_missing = bool(p.video_path and not Path(p.video_path).is_file())
+
             summaries.append(
                 ProjectSummary(
                     id=p.id,
@@ -932,9 +937,126 @@ class ProjectService:
                     has_transcript=bool(p.transcript_json),
                     clips_count=clips_count,
                     created_at=p.created_at.isoformat(),
+                    file_missing=is_missing,
                 )
             )
         return summaries
+
+    @classmethod
+    async def delete_project(cls, session: AsyncSession, project_id: str) -> dict:
+        """
+        Harden DELETE /api/projects/{project_id}:
+        - Cancel any running background job/process for project_id first (ignore errors if none active)
+        - Delete all child/related SQLite rows referencing project_id before deleting the Project row
+          so SQLite NEVER fails with a foreign-key constraint error.
+        - Delete project cache directory (settings.cache_dir / "projects" / project_id) using
+          shutil.rmtree(..., ignore_errors=True) — succeeding cleanly even if folder or video_path
+          was already manually deleted from disk.
+        - Return {"deleted": True, "project_id": project_id}.
+        """
+        # 1. Cancel running background process & active export jobs
+        try:
+            await ProcessManager.cancel_project(project_id)
+        except Exception:
+            pass
+
+        try:
+            from app.exports.service import get_jobs, cancel_job
+            jobs = await get_jobs(project_id)
+            for j in jobs:
+                if j.status in ("queued", "running"):
+                    await cancel_job(j.id)
+        except Exception:
+            pass
+
+        # 2. Delete child / related SQLite rows
+        try:
+            from app.workspace.models import WorkspaceConfig
+            await session.execute(delete(WorkspaceConfig).where(WorkspaceConfig.project_id == project_id))
+        except Exception:
+            pass
+
+        # 3. Delete Project row
+        await session.execute(delete(Project).where(Project.id == project_id))
+        await session.commit()
+
+        # 4. Clean up cache directory cleanly
+        proj_dir = settings.cache_dir / "projects" / project_id
+        shutil.rmtree(proj_dir, ignore_errors=True)
+
+        # 5. Broadcast to WS
+        try:
+            await ws_manager.broadcast(project_id, {"type": "deleted", "project_id": project_id})
+        except Exception:
+            pass
+
+        return {"deleted": True, "project_id": project_id}
+
+    @classmethod
+    async def cleanup_projects(
+        cls,
+        session: AsyncSession,
+        remove_missing: bool = True,
+        remove_cancelled: bool = True,
+    ) -> dict:
+        """
+        Finds all projects where video_path is missing on disk (when remove_missing=True)
+        OR status in ("cancelled", "failed", "error") (when remove_cancelled=True),
+        cascade-deletes them from SQLite, removes leftover workspace_cache/projects/<id>
+        folders, and returns {"removed_count": N, "removed_ids": [...]}.
+        """
+        q = select(Project)
+        res = await session.execute(q)
+        projects = res.scalars().all()
+
+        target_ids: list[str] = []
+        for p in projects:
+            should_remove = False
+            if remove_missing:
+                if p.video_path and not Path(p.video_path).is_file():
+                    should_remove = True
+                elif not p.video_path and p.status in ("ready", "error", "cancelled", "failed"):
+                    should_remove = True
+
+            if remove_cancelled:
+                if (p.status or "").lower() in ("cancelled", "failed", "error"):
+                    should_remove = True
+
+            if should_remove:
+                target_ids.append(p.id)
+
+        for pid in target_ids:
+            try:
+                await ProcessManager.cancel_project(pid)
+            except Exception:
+                pass
+
+            try:
+                from app.exports.service import get_jobs, cancel_job
+                jobs = await get_jobs(pid)
+                for j in jobs:
+                    if j.status in ("queued", "running"):
+                        await cancel_job(j.id)
+            except Exception:
+                pass
+
+            try:
+                from app.workspace.models import WorkspaceConfig
+                await session.execute(delete(WorkspaceConfig).where(WorkspaceConfig.project_id == pid))
+            except Exception:
+                pass
+
+            await session.execute(delete(Project).where(Project.id == pid))
+
+            proj_dir = settings.cache_dir / "projects" / pid
+            shutil.rmtree(proj_dir, ignore_errors=True)
+
+        await session.commit()
+
+        return {
+            "removed_count": len(target_ids),
+            "removed_ids": target_ids,
+        }
 
     @staticmethod
     def _to_read_schema(p: Project) -> ProjectRead:
@@ -958,6 +1080,8 @@ class ProjectService:
                 candidate_clips = [CandidateClip(**c) for c in raw_clips]
             except Exception:
                 candidate_clips = []
+
+        is_missing = bool(p.video_path and not Path(p.video_path).is_file())
 
         return ProjectRead(
             id=p.id,
@@ -985,6 +1109,7 @@ class ProjectService:
             ai_clip_recommendation=p.ai_clip_recommendation,
             error_message=p.error_message,
             active_pid=p.active_pid,
+            file_missing=is_missing,
             created_at=p.created_at.isoformat(),
             updated_at=p.updated_at.isoformat(),
         )

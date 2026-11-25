@@ -107,6 +107,7 @@ class DiscoverClipsRequest(APISchema):
     max_clips: int = Field(default=5, ge=1, le=100)
     custom_prompt: str | None = None
     allow_multi_segment: bool = False
+    auto_duration: bool = True
 
 
 class UpdateClipsRequest(APISchema):
@@ -143,6 +144,7 @@ class ProjectRead(APISchema):
     ai_clip_recommendation: str | None = None
     error_message: str | None = None
     active_pid: int | None = None
+    file_missing: bool = False
     created_at: str
     updated_at: str
 
@@ -157,9 +159,25 @@ class ProjectSummary(APISchema):
     has_transcript: bool = False
     clips_count: int = 0
     created_at: str
+    file_missing: bool = False
 
 
 class CancelJobResponse(APISchema):
     success: bool
     message: str
     project_id: str
+
+
+class DeleteProjectResponse(APISchema):
+    deleted: bool = True
+    project_id: str
+
+
+class ProjectCleanupRequest(APISchema):
+    remove_missing: bool = True
+    remove_cancelled: bool = True
+
+
+class ProjectCleanupResponse(APISchema):
+    removed_count: int
+    removed_ids: list[str] = []

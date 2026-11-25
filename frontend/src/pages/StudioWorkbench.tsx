@@ -13,6 +13,7 @@ import {
   Scissors,
   Sparkles,
   StopCircle,
+  Trash2,
   Upload,
   Video,
   Wand2,
@@ -25,7 +26,16 @@ import {
   TranscriptData,
   TranscriptSegment,
 } from '../types/project';
+import { SettingsRead, SystemDiagnosticsResponse } from '../types/diagnostics';
 import { useWorkspace } from '../context/WorkspaceContext';
+
+interface StudioWorkbenchProps {
+  diagnostics?: SystemDiagnosticsResponse | null;
+  settings?: SettingsRead | null;
+}
+
+const SS_MANUAL_MODEL_KEY = 'cf_studio_manual_ollama_model';
+const SS_LAST_SAVED_MODEL_KEY = 'cf_studio_last_saved_ollama_model';
 
 function formatDuration(sec: number | null): string {
   if (!sec || isNaN(sec)) return '0:00';
@@ -38,8 +48,33 @@ function formatDuration(sec: number | null): string {
   return `${m}:${s.toString().padStart(2, '0')}`;
 }
 
-export const StudioWorkbench: React.FC = () => {
-  const { activeProjectId, setActiveProjectId } = useWorkspace();
+export const StudioWorkbench: React.FC<StudioWorkbenchProps> = ({
+  diagnostics: propDiagnostics,
+  settings: propSettings,
+}) => {
+  const { activeProjectId, setActiveProjectId, setSelectedClipId } = useWorkspace();
+  const [internalDiagnostics, setInternalDiagnostics] = useState<SystemDiagnosticsResponse | null>(null);
+  const [internalSettings, setInternalSettings] = useState<SettingsRead | null>(null);
+
+  const effectiveDiagnostics = propDiagnostics ?? internalDiagnostics;
+  const effectiveSettings = propSettings ?? internalSettings;
+  const installedModels = effectiveDiagnostics?.ollama?.models || [];
+
+  useEffect(() => {
+    let isMounted = true;
+    Promise.all([api.getDiagnostics(), api.getSettings()])
+      .then(([diag, sett]) => {
+        if (isMounted) {
+          setInternalDiagnostics(diag);
+          setInternalSettings(sett);
+        }
+      })
+      .catch((err) => console.error('Failed to load live diagnostics/settings in StudioWorkbench:', err));
+
+    return () => {
+      isMounted = false;
+    };
+  }, []);
 
   // Ingest mode: 'url' or 'local'
   const [ingestTab, setIngestTab] = useState<'url' | 'local'>('url');
@@ -56,6 +91,12 @@ export const StudioWorkbench: React.FC = () => {
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [isCancelling, setIsCancelling] = useState(false);
 
+  // Deletion & Cleanup states
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
+  const [isDeleting, setIsDeleting] = useState(false);
+  const [isCleaning, setIsCleaning] = useState(false);
+  const [actionError, setActionError] = useState<string | null>(null);
+
   // Phase 3: Transcription State
   const [whisperModel, setWhisperModel] = useState('base');
   const [language, setLanguage] = useState('auto');
@@ -71,7 +112,49 @@ export const StudioWorkbench: React.FC = () => {
   const [transcriptSaveNotice, setTranscriptSaveNotice] = useState(false);
 
   // Phase 3: Ollama Clip Discovery State
-  const [ollamaModel, setOllamaModel] = useState('qwen2.5:7b');
+  const [ollamaModel, setOllamaModel] = useState<string>(() => {
+    const saved = propSettings?.ollamaModel;
+    const manual = sessionStorage.getItem(SS_MANUAL_MODEL_KEY);
+    const lastSaved = sessionStorage.getItem(SS_LAST_SAVED_MODEL_KEY);
+    if (saved && lastSaved && saved !== lastSaved) {
+      sessionStorage.removeItem(SS_MANUAL_MODEL_KEY);
+      sessionStorage.setItem(SS_LAST_SAVED_MODEL_KEY, saved);
+      return saved;
+    }
+    if (manual) return manual;
+    return saved || '';
+  });
+
+  useEffect(() => {
+    if (!effectiveSettings) return;
+
+    const currentSavedModel = effectiveSettings.ollamaModel || '';
+    const lastSavedModel = sessionStorage.getItem(SS_LAST_SAVED_MODEL_KEY);
+    let manualModel = sessionStorage.getItem(SS_MANUAL_MODEL_KEY);
+
+    // If user changed and saved settings in Hardware & Settings, clear manual selection
+    if (lastSavedModel !== null && currentSavedModel && lastSavedModel !== currentSavedModel) {
+      sessionStorage.removeItem(SS_MANUAL_MODEL_KEY);
+      manualModel = null;
+    }
+    if (currentSavedModel) {
+      sessionStorage.setItem(SS_LAST_SAVED_MODEL_KEY, currentSavedModel);
+    }
+
+    const installedNames = installedModels.map((m) => m.name);
+    if (installedNames.length > 0) {
+      if (manualModel && installedNames.includes(manualModel)) {
+        setOllamaModel(manualModel);
+      } else if (currentSavedModel && installedNames.includes(currentSavedModel)) {
+        setOllamaModel(currentSavedModel);
+      } else {
+        setOllamaModel(installedNames[0]);
+      }
+    } else {
+      setOllamaModel(currentSavedModel || '');
+    }
+  }, [effectiveSettings?.ollamaModel, installedModels]);
+  const [autoDuration, setAutoDuration] = useState(true);
   const [minDuration, setMinDuration] = useState(15);
   const [maxDuration, setMaxDuration] = useState(60);
   const [maxClips, setMaxClips] = useState(5);
@@ -214,6 +297,8 @@ export const StudioWorkbench: React.FC = () => {
     try {
       const updated = await api.discoverClips(activeProject.id, {
         ollamaModel,
+        autoDuration,
+        auto_duration: autoDuration,
         minDurationSec: minDuration,
         maxDurationSec: maxDuration,
         clipCountMode,
@@ -294,6 +379,87 @@ export const StudioWorkbench: React.FC = () => {
       setShowTranscript(false);
     } catch (err) {
       console.error('Failed to switch project:', err);
+    }
+  };
+
+  const handleDeleteProject = async (id: string) => {
+    setIsDeleting(true);
+    setActionError(null);
+    try {
+      await api.deleteProject(id);
+      setConfirmDeleteId(null);
+      const updatedList = await api.listProjects();
+      setProjects(updatedList);
+
+      if (activeProjectId === id || activeProject?.id === id) {
+        if (updatedList.length > 0) {
+          const nextId = updatedList[0].id;
+          setActiveProjectId(nextId);
+          setSelectedClipId('');
+          try {
+            const full = await api.getProject(nextId);
+            setActiveProject(full);
+          } catch {
+            setActiveProject(null);
+          }
+        } else {
+          setActiveProjectId('');
+          setSelectedClipId('');
+          setActiveProject(null);
+        }
+        setLiveProgress(null);
+        setShowTranscript(false);
+        setTranscriptData(null);
+        setEditingSegments([]);
+      }
+    } catch (err: any) {
+      console.error('Failed to delete project:', err);
+      setActionError(err.message || 'Failed to delete project');
+    } finally {
+      setIsDeleting(false);
+    }
+  };
+
+  const handleCleanupProjects = async () => {
+    setIsCleaning(true);
+    setActionError(null);
+    try {
+      const res = await api.cleanupProjects({ removeMissing: true, removeCancelled: true });
+      const updatedList = await api.listProjects();
+      setProjects(updatedList);
+
+      const removedIds: string[] = res.removedIds || (res as any).removed_ids || [];
+      const activeWasRemoved =
+        (activeProjectId && removedIds.includes(activeProjectId)) ||
+        (activeProject && removedIds.includes(activeProject.id)) ||
+        (activeProjectId && !updatedList.some((p) => p.id === activeProjectId));
+
+      if (activeWasRemoved) {
+        if (updatedList.length > 0) {
+          const nextId = updatedList[0].id;
+          setActiveProjectId(nextId);
+          setSelectedClipId('');
+          try {
+            const full = await api.getProject(nextId);
+            setActiveProject(full);
+          } catch {
+            setActiveProject(null);
+          }
+        } else {
+          setActiveProjectId('');
+          setSelectedClipId('');
+          setActiveProject(null);
+        }
+        setLiveProgress(null);
+        setShowTranscript(false);
+        setTranscriptData(null);
+        setEditingSegments([]);
+      }
+    } catch (err: any) {
+      console.error('Failed to clean up projects:', err);
+      setActionError(err.message || 'Failed to clean up projects');
+    } finally {
+      setIsCleaning(false);
     }
   };
 
@@ -462,39 +628,125 @@ export const StudioWorkbench: React.FC = () => {
 
           {/* Project List */}
           <div className="bg-surface border border-border rounded-xl p-5 space-y-3">
-            <h3 className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold">
-              Recent Projects ({projects.length})
-            </h3>
-            <div className="space-y-1.5 max-h-56 overflow-y-auto">
-              {projects.map((p) => (
-                <div
-                  key={p.id}
-                  onClick={() => handleSelectProject(p.id)}
-                  className={`p-2.5 rounded-lg border text-xs font-mono cursor-pointer transition-all flex items-center justify-between ${
-                    activeProject?.id === p.id
-                      ? 'bg-cyan-950/40 border-cyan-500/70 text-slate-100'
-                      : 'bg-surface-elevated border-border-subtle hover:border-slate-600 text-slate-300'
-                  }`}
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <h3 className="text-xs font-mono uppercase tracking-wider text-slate-400 font-semibold">
+                  Recent Projects ({projects.length})
+                </h3>
+                <button
+                  type="button"
+                  onClick={handleCleanupProjects}
+                  disabled={isCleaning}
+                  title="Wipe manually deleted and cancelled/failed projects"
+                  className="px-2 py-0.5 rounded bg-surface-elevated hover:bg-slate-700 text-slate-300 hover:text-cyan-400 border border-border text-[10px] font-mono transition-all disabled:opacity-50"
                 >
-                  <div className="truncate pr-2">
-                    <div className="font-semibold text-slate-100 truncate">{p.title}</div>
-                    <div className="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
-                      <span className="uppercase">{p.sourceType}</span>
-                      {p.durationSec ? <span>{formatDuration(p.durationSec)}</span> : null}
-                      {p.hasTranscript ? <span className="text-emerald-400">✓ Transcribed</span> : null}
-                    </div>
-                  </div>
-                  <span
-                    className={`text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0 ${
-                      p.status === 'ready'
-                        ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
-                        : 'bg-amber-950 text-amber-400 border border-amber-800 animate-pulse'
-                    }`}
-                  >
-                    {p.status}
-                  </span>
+                  {isCleaning ? 'Cleaning...' : 'Clean Up'}
+                </button>
+              </div>
+            </div>
+
+            {actionError && (
+              <div className="p-2.5 rounded-lg bg-rose-950/60 border border-rose-800 text-rose-300 text-xs font-mono flex items-center justify-between">
+                <span>{actionError}</span>
+                <button
+                  type="button"
+                  onClick={() => setActionError(null)}
+                  className="text-rose-400 hover:text-rose-200 ml-2"
+                >
+                  ✕
+                </button>
+              </div>
+            )}
+
+            <div className="space-y-1.5 max-h-56 overflow-y-auto">
+              {projects.length === 0 ? (
+                <div className="text-center py-6 text-xs font-mono text-slate-500">
+                  No projects found. Ingest or upload a video to start.
                 </div>
-              ))}
+              ) : (
+                projects.map((p) => {
+                  const isMissing = Boolean(p.fileMissing ?? (p as any).file_missing);
+                  return (
+                    <div
+                      key={p.id}
+                      onClick={() => handleSelectProject(p.id)}
+                      className={`p-2.5 rounded-lg border text-xs font-mono cursor-pointer transition-all flex items-center justify-between gap-2 ${
+                        activeProject?.id === p.id
+                          ? 'bg-cyan-950/40 border-cyan-500/70 text-slate-100'
+                          : 'bg-surface-elevated border-border-subtle hover:border-slate-600 text-slate-300'
+                      }`}
+                    >
+                      <div className="truncate flex-1 min-w-0 pr-1">
+                        <div className="font-semibold text-slate-100 truncate">{p.title}</div>
+                        <div className="text-[10px] text-slate-400 flex items-center gap-2 mt-0.5">
+                          <span className="uppercase">{p.sourceType}</span>
+                          {p.durationSec ? <span>{formatDuration(p.durationSec)}</span> : null}
+                          {p.hasTranscript ? <span className="text-emerald-400">✓ Transcribed</span> : null}
+                        </div>
+                      </div>
+
+                      <div className="flex items-center gap-2 flex-shrink-0">
+                        {isMissing && (
+                          <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-rose-950 text-rose-400 border border-rose-800 font-mono font-medium flex-shrink-0">
+                            Missing on disk
+                          </span>
+                        )}
+                        <span
+                          className={`text-[10px] px-1.5 py-0.5 rounded-full flex-shrink-0 ${
+                            p.status === 'ready'
+                              ? 'bg-emerald-950 text-emerald-400 border border-emerald-800'
+                              : 'bg-amber-950 text-amber-400 border border-amber-800 animate-pulse'
+                          }`}
+                        >
+                          {p.status}
+                        </span>
+
+                        {confirmDeleteId === p.id ? (
+                          <div
+                            className="flex items-center gap-1 bg-surface border border-rose-900/80 rounded px-1.5 py-0.5"
+                            onClick={(e) => e.stopPropagation()}
+                          >
+                            <span className="text-[10px] text-rose-300 font-mono">Confirm?</span>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                handleDeleteProject(p.id);
+                              }}
+                              disabled={isDeleting}
+                              className="px-1.5 py-0.5 rounded bg-rose-600 hover:bg-rose-500 text-white text-[10px] font-bold"
+                            >
+                              Yes
+                            </button>
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation();
+                                setConfirmDeleteId(null);
+                              }}
+                              className="px-1.5 py-0.5 rounded bg-slate-700 hover:bg-slate-600 text-slate-300 text-[10px]"
+                            >
+                              No
+                            </button>
+                          </div>
+                        ) : (
+                          <button
+                            type="button"
+                            title="Delete project"
+                            onClick={(e) => {
+                              e.stopPropagation();
+                              setConfirmDeleteId(p.id);
+                            }}
+                            className="p-1 rounded text-slate-400 hover:text-rose-400 hover:bg-rose-950/40 transition-colors flex-shrink-0"
+                          >
+                            <Trash2 className="w-3.5 h-3.5" />
+                          </button>
+                        )}
+                      </div>
+                    </div>
+                  );
+                })
+              )}
             </div>
           </div>
         </div>
@@ -807,38 +1059,124 @@ export const StudioWorkbench: React.FC = () => {
                     <label className="block text-[11px] font-mono text-slate-400 mb-1">Ollama Model</label>
                     <select
                       value={ollamaModel}
-                      onChange={(e) => setOllamaModel(e.target.value)}
-                      className="w-full bg-surface border border-border rounded px-2.5 py-1.5 text-xs font-mono text-slate-200"
+                      onChange={(e) => {
+                        setOllamaModel(e.target.value);
+                        sessionStorage.setItem(SS_MANUAL_MODEL_KEY, e.target.value);
+                      }}
+                      disabled={installedModels.length === 0}
+                      className="w-full bg-surface border border-border rounded px-2.5 py-1.5 text-xs font-mono text-slate-200 focus:outline-none focus:border-cyan-500 disabled:opacity-50 disabled:cursor-not-allowed"
                     >
-                      <option value="qwen2.5:7b">qwen2.5:7b (Recommended)</option>
-                      <option value="qwen2.5:3b">qwen2.5:3b (Lite)</option>
-                      <option value="llama3.2:3b">llama3.2:3b</option>
-                      <option value="llama3.1:8b">llama3.1:8b</option>
+                      {installedModels.length > 0 ? (
+                        installedModels.map((m) => (
+                          <option key={m.name} value={m.name}>
+                            {m.name} {m.parameterSize ? `(${m.parameterSize})` : ''}
+                          </option>
+                        ))
+                      ) : (
+                        <option value="">No local models</option>
+                      )}
                     </select>
+                    {installedModels.length === 0 && (
+                      <p className="text-[10px] text-amber-400 font-mono mt-1">
+                        No local Ollama models found — run ollama pull
+                      </p>
+                    )}
                   </div>
 
                   <div>
-                    <label className="block text-[11px] font-mono text-slate-400 mb-1">
-                      Clip Duration ({minDuration}s - {maxDuration}s)
-                    </label>
-                    <div className="flex items-center gap-2">
-                      <input
-                        type="range"
-                        min="10"
-                        max="30"
-                        value={minDuration}
-                        onChange={(e) => setMinDuration(Number(e.target.value))}
-                        className="w-full accent-cyan-500"
-                      />
-                      <input
-                        type="range"
-                        min="30"
-                        max="90"
-                        value={maxDuration}
-                        onChange={(e) => setMaxDuration(Number(e.target.value))}
-                        className="w-full accent-cyan-500"
-                      />
+                    <label className="block text-[11px] font-mono text-slate-400 mb-1">Clip Length</label>
+                    <div className="flex gap-2 mb-2">
+                      <button
+                        type="button"
+                        onClick={() => setAutoDuration(true)}
+                        className={`flex-1 px-2 py-1.5 rounded-lg border text-xs font-mono transition-all ${
+                          autoDuration
+                            ? 'border-violet-500 text-violet-300 bg-violet-950/60 font-semibold shadow-sm'
+                            : 'border-border text-slate-400 hover:border-slate-500'
+                        }`}
+                      >
+                        🤖 Auto (AI Decides for Shorts & Reels)
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => setAutoDuration(false)}
+                        className={`flex-1 px-2 py-1.5 rounded-lg border text-xs font-mono transition-all ${
+                          !autoDuration
+                            ? 'border-cyan-500 text-cyan-300 bg-cyan-950/60 font-semibold shadow-sm'
+                            : 'border-border text-slate-400 hover:border-slate-500'
+                        }`}
+                      >
+                        ⏱️ Custom Range
+                      </button>
                     </div>
+
+                    {autoDuration ? (
+                      <div className="p-2 rounded-lg bg-surface border border-violet-900/40 text-[11px] font-mono text-violet-300 flex items-center gap-2">
+                        <Sparkles className="w-3.5 h-3.5 text-violet-400 flex-shrink-0" />
+                        <span>AI picks story-complete lengths (~10s–120s) based on content meaning</span>
+                      </div>
+                    ) : (
+                      <div className="space-y-1.5">
+                        <div className="flex items-center gap-2">
+                          <div className="flex-1">
+                            <label className="block text-[10px] font-mono text-slate-400 mb-0.5">Min (s)</label>
+                            <input
+                              type="number"
+                              min={5}
+                              max={120}
+                              value={minDuration}
+                              onChange={(e) => {
+                                const val = Math.max(5, Math.min(120, Number(e.target.value) || 5));
+                                setMinDuration(val);
+                                if (val > maxDuration) setMaxDuration(val);
+                              }}
+                              className="w-full bg-surface border border-border rounded px-2 py-1 text-xs font-mono text-slate-200"
+                            />
+                          </div>
+                          <div className="flex-1">
+                            <label className="block text-[10px] font-mono text-slate-400 mb-0.5">Max (s)</label>
+                            <input
+                              type="number"
+                              min={10}
+                              max={300}
+                              value={maxDuration}
+                              onChange={(e) => {
+                                const val = Math.max(10, Math.min(300, Number(e.target.value) || 10));
+                                setMaxDuration(val);
+                                if (val < minDuration) setMinDuration(val);
+                              }}
+                              className="w-full bg-surface border border-border rounded px-2 py-1 text-xs font-mono text-slate-200"
+                            />
+                          </div>
+                        </div>
+                        <div className="flex items-center gap-2">
+                          <input
+                            type="range"
+                            min="5"
+                            max="60"
+                            value={minDuration}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setMinDuration(val);
+                              if (val > maxDuration) setMaxDuration(val);
+                            }}
+                            className="w-full accent-cyan-500"
+                          />
+                          <input
+                            type="range"
+                            min="10"
+                            max="180"
+                            value={maxDuration}
+                            onChange={(e) => {
+                              const val = Number(e.target.value);
+                              setMaxDuration(val);
+                              if (val < minDuration) setMinDuration(val);
+                            }}
+                            className="w-full accent-cyan-500"
+                          />
+                        </div>
+                      </div>
+                    )}
                   </div>
 
                   <div>

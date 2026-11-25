@@ -134,6 +134,8 @@ export interface DiscoverClipsRequest {
   maxClips?: number;
   customPrompt?: string;
   allowMultiSegment?: boolean;
+  autoDuration?: boolean;
+  auto_duration?: boolean;
 }
 
 export interface ProjectRead {
@@ -172,6 +174,8 @@ export interface ProjectRead {
   aiClipRecommendation: string | null;
   errorMessage: string | null;
   activePid: number | null;
+  fileMissing?: boolean;
+  file_missing?: boolean;
   createdAt: string;
   updatedAt: string;
 }
@@ -185,6 +189,8 @@ export interface ProjectSummary {
   durationSec: number | null;
   hasTranscript: boolean;
   clipsCount: number;
+  fileMissing?: boolean;
+  file_missing?: boolean;
   createdAt: string;
 }
 
@@ -237,6 +243,8 @@ export interface FramingConfig {
   watermark: WatermarkConfig | null;
   faceDetected?: boolean | null;
   dynamicFacecamTracking?: boolean;
+  gamingTrackingMode?: 'overlay_lock' | 'face_lock';
+  referenceTimeSec?: number;
 }
 
 export interface SavedProfile {
@@ -253,6 +261,8 @@ export interface SavedProfile {
   ollamaPrompt: string | null;
   captionStyle: string;
   dynamicFacecamTracking?: boolean;
+  gamingTrackingMode?: 'overlay_lock' | 'face_lock';
+  referenceTimeSec?: number;
   createdAt: string;
   updatedAt: string;
 }

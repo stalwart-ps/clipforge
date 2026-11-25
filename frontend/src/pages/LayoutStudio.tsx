@@ -241,6 +241,8 @@ export const LayoutStudio: React.FC = () => {
   });
   const [faceDetected, setFaceDetected] = useState<boolean | null>(null);
   const [dynamicFacecamTracking, setDynamicFacecamTracking] = useState<boolean>(false);
+  const [gamingTrackingMode, setGamingTrackingMode] = useState<'overlay_lock' | 'face_lock'>('overlay_lock');
+  const [referenceTimeSec, setReferenceTimeSec] = useState<number>(5.0);
   const [paneFitMode, setPaneFitMode] = useState<PaneFitMode>('fill');
   const [tightness, setTightness] = useState<'close' | 'medium' | 'wide'>('medium');
   const [punchInZoomed, setPunchInZoomed] = useState<boolean>(true);
@@ -322,6 +324,10 @@ export const LayoutStudio: React.FC = () => {
         if (typeof lc.watermarkPath === 'string' || lc.watermarkPath === null) setWatermarkPath(lc.watermarkPath as string | null);
         if (typeof lc.dynamicFacecamTracking === 'boolean') setDynamicFacecamTracking(lc.dynamicFacecamTracking);
         else if (typeof lc.dynamic_facecam_tracking === 'boolean') setDynamicFacecamTracking(lc.dynamic_facecam_tracking);
+        if (lc.gamingTrackingMode) setGamingTrackingMode(lc.gamingTrackingMode as 'overlay_lock' | 'face_lock');
+        else if (lc.gaming_tracking_mode) setGamingTrackingMode(lc.gaming_tracking_mode as 'overlay_lock' | 'face_lock');
+        if (typeof lc.referenceTimeSec === 'number') setReferenceTimeSec(lc.referenceTimeSec);
+        else if (typeof lc.reference_time_sec === 'number') setReferenceTimeSec(lc.reference_time_sec);
         if (lc.paneFitMode) setPaneFitMode(lc.paneFitMode as PaneFitMode);
         else if (lc.pane_fit_mode) setPaneFitMode(lc.pane_fit_mode as PaneFitMode);
       }
@@ -365,6 +371,8 @@ export const LayoutStudio: React.FC = () => {
           watermarkCorner,
           watermarkPath,
           dynamicFacecamTracking,
+          gamingTrackingMode,
+          referenceTimeSec,
         },
       }).catch(console.error);
     }, 800);
@@ -383,6 +391,8 @@ export const LayoutStudio: React.FC = () => {
     watermarkCorner,
     watermarkPath,
     dynamicFacecamTracking,
+    gamingTrackingMode,
+    referenceTimeSec,
   ]);
 
   // Seek to new frame time
@@ -987,6 +997,7 @@ export const LayoutStudio: React.FC = () => {
     if (boxKey === 'facecam') {
       setFacecamBox(newBox);
       setFaceDetected(true);
+      setReferenceTimeSec(frameSec);
     } else {
       setGameplayBox(newBox);
     }
@@ -1012,8 +1023,10 @@ export const LayoutStudio: React.FC = () => {
         splitRatio
       );
       setDetectResult(result);
-      if (result.facecamBox) setFacecamBox(result.facecamBox);
-      else if (result.faceCount === 0) setFacecamBox(null);
+      if (result.facecamBox) {
+        setFacecamBox(result.facecamBox);
+        setReferenceTimeSec(frameSec);
+      } else if (result.faceCount === 0) setFacecamBox(null);
       if (result.gameplayBox) setGameplayBox(result.gameplayBox);
       setFaceDetected(result.faceCount > 0);
       if (result.modeSuggestion) {
@@ -1060,6 +1073,8 @@ export const LayoutStudio: React.FC = () => {
         ollamaPrompt: null,
         captionStyle: 'hormozi_pop',
         dynamicFacecamTracking,
+        gamingTrackingMode,
+        referenceTimeSec,
       } as Parameters<typeof api.createProfile>[0]);
       setProfiles((prev) => [created, ...prev]);
       setProfileName('');
@@ -1088,6 +1103,12 @@ export const LayoutStudio: React.FC = () => {
     if (typeof profile.dynamicFacecamTracking === 'boolean') {
       setDynamicFacecamTracking(profile.dynamicFacecamTracking);
     }
+    if (profile.gamingTrackingMode) {
+      setGamingTrackingMode(profile.gamingTrackingMode);
+    }
+    if (typeof profile.referenceTimeSec === 'number') {
+      setReferenceTimeSec(profile.referenceTimeSec);
+    }
   };
 
   const handleDeleteProfile = async (id: string) => {
@@ -1113,6 +1134,8 @@ export const LayoutStudio: React.FC = () => {
       watermark: watermarkPath ? { path: watermarkPath, corner: watermarkCorner, scale: watermarkScale, opacity: watermarkOpacity } : null,
       faceDetected,
       dynamicFacecamTracking,
+      gamingTrackingMode,
+      referenceTimeSec,
     };
 
     try {
@@ -1220,6 +1243,7 @@ export const LayoutStudio: React.FC = () => {
                     } else {
                       setFacecamBox({ x: 0.1, y: 0.1, w: 0.35, h: 0.45 });
                     }
+                    setReferenceTimeSec(frameSec);
                     setFaceDetected(true);
                   }}
                   className="px-2 py-1 text-[11px] font-mono rounded border border-fuchsia-700 text-fuchsia-400 hover:bg-fuchsia-950/70 transition-all"
@@ -1350,6 +1374,52 @@ export const LayoutStudio: React.FC = () => {
                 />
               </button>
             </div>
+
+            {/* Gaming Tracking Mode Segmented Control (Only when Gaming Mode + Dynamic Tracking enabled) */}
+            {framingMode === 'gaming' && dynamicFacecamTracking && (
+              <div className="pt-2 border-t border-border-subtle/70 space-y-1.5">
+                <div className="flex items-center justify-between">
+                  <span className="text-[11px] font-mono text-slate-300 font-medium">
+                    Gaming Tracking Mode
+                  </span>
+                  <span className="text-[9px] font-mono text-slate-500">
+                    Ref Frame: {referenceTimeSec.toFixed(1)}s
+                  </span>
+                </div>
+                <div className="grid grid-cols-2 gap-2 p-1 bg-surface-subtle/80 rounded-lg border border-border">
+                  <button
+                    type="button"
+                    onClick={() => setGamingTrackingMode('overlay_lock')}
+                    title="Locks onto webcam room background · ignores NPCs · auto-switches on fullscreen cam or hidden cam"
+                    className={`py-1.5 px-2 rounded-md text-left transition-all ${
+                      gamingTrackingMode === 'overlay_lock'
+                        ? 'bg-cyan-950/80 border border-cyan-500 text-cyan-300 shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200 border border-transparent hover:bg-slate-800/40'
+                    }`}
+                  >
+                    <div className="text-[11px] font-mono font-semibold leading-tight">Overlay Lock (Boxed Cam)</div>
+                    <div className="text-[9px] font-mono text-slate-400 mt-0.5 leading-snug">
+                      Locks onto webcam room background · ignores NPCs · auto-switches on fullscreen cam or hidden cam
+                    </div>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => setGamingTrackingMode('face_lock')}
+                    title="For background-removed / green-screen webcams"
+                    className={`py-1.5 px-2 rounded-md text-left transition-all ${
+                      gamingTrackingMode === 'face_lock'
+                        ? 'bg-cyan-950/80 border border-cyan-500 text-cyan-300 shadow-sm'
+                        : 'text-slate-400 hover:text-slate-200 border border-transparent hover:bg-slate-800/40'
+                    }`}
+                  >
+                    <div className="text-[11px] font-mono font-semibold leading-tight">Face Lock (Green Screen)</div>
+                    <div className="text-[9px] font-mono text-slate-400 mt-0.5 leading-snug">
+                      For background-removed / green-screen webcams
+                    </div>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* 2. Output Preview Panel (Beside regions canvas, 30% width) */}
@@ -1789,6 +1859,7 @@ export const LayoutStudio: React.FC = () => {
                 type="button"
                 onClick={() => {
                   setFacecamBox({ x: 0.1, y: 0.1, w: 0.35, h: 0.45 });
+                  setReferenceTimeSec(frameSec);
                   setFaceDetected(true);
                 }}
                 className="px-2.5 py-1 text-xs font-mono rounded border border-fuchsia-700 text-fuchsia-400 hover:bg-fuchsia-950 transition-all"
