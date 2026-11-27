@@ -124,6 +124,7 @@ class ProjectService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(settings.backend_dir / "workers"),
+                limit=16 * 1024 * 1024,
             )
 
             await ProcessManager.register_process(project_id, proc.pid)
@@ -170,7 +171,14 @@ class ProjectService:
                         pass
                 elif text.startswith("COMPLETE:"):
                     try:
-                        complete_data = json.loads(text[9:])
+                        parsed = json.loads(text[9:])
+                        if isinstance(parsed, dict) and "result_file" in parsed:
+                            result_path = Path(parsed["result_file"])
+                            if result_path.exists():
+                                with open(result_path, "r", encoding="utf-8") as rf:
+                                    complete_data = json.load(rf)
+                        else:
+                            complete_data = parsed
                     except Exception:
                         pass
 
@@ -320,6 +328,7 @@ class ProjectService:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=16 * 1024 * 1024,
             )
             await ProcessManager.register_process(project_id, proc.pid)
             await proc.wait()
@@ -464,6 +473,7 @@ class ProjectService:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 cwd=str(settings.backend_dir / "workers"),
+                limit=16 * 1024 * 1024,
             )
             await ProcessManager.register_process(project_id, proc.pid)
 
@@ -591,6 +601,7 @@ class ProjectService:
                 *cmd,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
+                limit=16 * 1024 * 1024,
             )
             await ProcessManager.register_process(project_id, proc.pid)
 

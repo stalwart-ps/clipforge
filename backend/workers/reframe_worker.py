@@ -36,6 +36,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 
 # Ensure backend root is on sys.path
@@ -478,30 +479,36 @@ def decode_segment_frames(
 ):
     """Decode exact expected_frames from video segment using FFmpeg CFR rawvideo pipe.
 
+    Uses hybrid coarse+fine seeking (coarse = seg_start - 4s before -i, fine = remainder after -i)
+    to prevent NVDEC keyframe pre-roll desync. h264_nvenc GPU encoding is kept on the output encoder.
     Guarantees 100% frame-accurate A/V sync.
     If decoder ends early, repeats the last frame until expected_frames is emitted.
     If decoder outputs extra frames, stops cleanly at expected_frames and terminates cleanly.
     """
     ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
-    expected_frames = max(1, int(round(seg_dur * target_fps)))
+    expected_frames = max(1, round(seg_dur * target_fps))
+    exact_seg_dur = expected_frames / target_fps
+    coarse = max(0.0, seg_start - 4.0)
+    fine = seg_start - coarse
     frame_bytes = decode_w * decode_h * 3
 
     vf = f"fps={target_fps:.6f},scale={decode_w}:{decode_h}"
 
-    if use_cuda is None:
-        use_cuda = can_use_cuda_decode(video_path)
-
-    hw_args = ["-hwaccel", "cuda"] if use_cuda else []
+    # NOTE: -hwaccel cuda is intentionally NOT used for segment decoding —
+    # NVDEC before -ss causes keyframe pre-roll frame leakage that desyncs video from audio.
+    # h264_nvenc GPU encoding is kept on the output side.
 
     cmd = [
         ffmpeg_bin,
         "-hide_banner",
         "-loglevel", "error",
-        *hw_args,
-        "-ss", f"{seg_start:.6f}",
-        "-t", f"{seg_dur:.6f}",
+        "-ss", f"{coarse:.6f}",
         "-i", str(video_path),
+        "-ss", f"{fine:.6f}",
+        "-t", f"{exact_seg_dur:.6f}",
+        "-map", "0:v:0",
         "-vf", vf,
+        "-fps_mode", "cfr",
         "-f", "rawvideo",
         "-pix_fmt", "bgr24",
         "pipe:1",
@@ -642,6 +649,8 @@ def measure_loudnorm(
 ) -> dict[str, str] | None:
     """Run a fast audio-only FFmpeg null pass to measure loudnorm stats.
 
+    Uses hybrid coarse+fine seeking (identical to the Pass 2 video decoder) so measured audio
+    stats match the actual segment audio that will be encoded.
     Returns dict with input_i, input_tp, input_lra, input_thresh, target_offset if all
     measured values are valid finite numbers, else None.
     """
@@ -649,18 +658,20 @@ def measure_loudnorm(
         ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
         cmd = [ffmpeg_bin, "-hide_banner", "-y"]
 
+        seg_params: list[tuple[float, float, float]] = []  # (coarse, fine, dur)
         for seg_start, seg_end in intervals:
             seg_dur = max(0.001, seg_end - seg_start)
+            coarse = max(0.0, seg_start - 4.0)
+            fine = seg_start - coarse
+            seg_params.append((coarse, fine, seg_dur))
+            # Coarse seek before -i, fine seek + duration after -i (single input per segment)
             cmd += [
-                "-vn", "-sn", "-dn",
-                "-ss", f"{seg_start:.6f}",
-                "-t", f"{seg_dur + 1.0:.6f}",
+                "-ss", f"{coarse:.6f}",
                 "-i", str(video_path),
             ]
 
         filter_parts: list[str] = []
-        for k, (seg_start, seg_end) in enumerate(intervals):
-            dur = max(0.001, seg_end - seg_start)
+        for k, (coarse, fine, dur) in enumerate(seg_params):
             fade_str = ""
             if dur > 0.20 and len(intervals) > 1:
                 fades = []
@@ -671,7 +682,7 @@ def measure_loudnorm(
                 fade_str = "," + ",".join(fades)
 
             filter_parts.append(
-                f"[{k}:a:{audio_idx}]atrim=start=0:duration={dur:.6f},"
+                f"[{k}:a:{audio_idx}]atrim=start={fine:.6f}:duration={dur:.6f},"
                 f"asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0{fade_str}[a{k}]"
             )
 
@@ -738,8 +749,14 @@ def build_ffmpeg_cmd(
     cwd: str | None = None,
     audio_idx: int | None = None,
     measured_loudnorm: dict | None = None,
+    seg_wav_paths: list[str] | None = None,
 ) -> list[str]:
-    """Assemble FFmpeg CLI invocation for piped raw YUV420P input and audio/subtitle muxing."""
+    """Assemble FFmpeg CLI invocation for piped raw YUV420P input and audio/subtitle muxing.
+
+    When seg_wav_paths is provided (one PCM WAV per interval, pre-extracted with the same
+    hybrid coarse+fine seek as Pass 2 video), those WAV files are used as audio inputs
+    instead of re-seeking video_path with -vn, eliminating audio seek drift.
+    """
     ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
     cmd = [ffmpeg_bin, "-hide_banner", "-y"]
 
@@ -755,22 +772,31 @@ def build_ffmpeg_cmd(
         "-i", "pipe:0",
     ]
 
+    n_audio_inputs = 0
     if has_audio:
         if audio_idx is None:
             audio_idx = resolve_primary_audio_index(video_path)
 
-        for seg_start, seg_end in intervals:
-            seg_dur = max(0.001, seg_end - seg_start)
-            cmd += [
-                "-vn", "-sn", "-dn",
-                "-ss", f"{seg_start:.6f}",
-                "-t", f"{seg_dur + 1.0:.6f}",
-                "-i", str(video_path),
-            ]
+        if seg_wav_paths:
+            # Use pre-extracted WAV files — zero seek drift, perfectly aligned with Pass 2 video
+            for wav_path in seg_wav_paths:
+                cmd += ["-i", str(wav_path)]
+            n_audio_inputs = len(seg_wav_paths)
+        else:
+            # Fallback: re-seek video_path with hybrid coarse+fine seek (no -vn before -i)
+            for seg_start, seg_end in intervals:
+                seg_dur = max(0.001, seg_end - seg_start)
+                coarse = max(0.0, seg_start - 4.0)
+                fine = seg_start - coarse
+                cmd += [
+                    "-ss", f"{coarse:.6f}",
+                    "-i", str(video_path),
+                ]
+            n_audio_inputs = len(intervals)
 
     wm_idx = None
     if watermark_path and Path(watermark_path).is_file():
-        wm_idx = 1 + len(intervals) if has_audio else 1
+        wm_idx = 1 + n_audio_inputs
         cmd += ["-i", watermark_path]
 
     filter_parts: list[str] = []
@@ -821,25 +847,53 @@ def build_ffmpeg_cmd(
         filter_parts.append(f"{v_cur}null[v_final]")
 
     if has_audio:
-        for k, (seg_start, seg_end) in enumerate(intervals):
-            dur = max(0.001, seg_end - seg_start)
-            fade_str = ""
-            if dur > 0.20 and len(intervals) > 1:
-                fades = []
-                if k > 0:
-                    fades.append("afade=t=in:st=0:d=0.010")
-                fade_out_st = max(0.0, dur - 0.015)
-                fades.append(f"afade=t=out:st={fade_out_st:.3f}:d=0.015")
-                fade_str = "," + ",".join(fades)
+        N = len(intervals)
+        multi_seg = N > 1
 
-            filter_parts.append(
-                f"[{k + 1}:a:{audio_idx}]atrim=start=0:duration={dur:.6f},"
-                f"asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0{fade_str}[a{k}]"
-            )
+        if seg_wav_paths:
+            # WAV inputs are already exactly trimmed to seg duration with first_pts=0.
+            # Apply asetpts=PTS-STARTPTS to normalize PTS; add 10ms edge fades only on
+            # stitched multi-segment joints (not on the very first or last segment edges).
+            for k in range(N):
+                seg_start, seg_end = intervals[k]
+                dur = max(0.001, seg_end - seg_start)
+                fade_str = ""
+                if multi_seg and dur > 0.020:
+                    fades = []
+                    if k > 0:
+                        fades.append("afade=t=in:st=0:d=0.010")
+                    if k < N - 1:
+                        fade_out_st = max(0.0, dur - 0.015)
+                        fades.append(f"afade=t=out:st={fade_out_st:.3f}:d=0.015")
+                    if fades:
+                        fade_str = "," + ",".join(fades)
+                filter_parts.append(
+                    f"[{k + 1}:a:0]asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0{fade_str}[a{k}]"
+                )
+        else:
+            # Fallback: inputs are coarse-seek video files; use atrim with fine offset
+            for k, (seg_start, seg_end) in enumerate(intervals):
+                dur = max(0.001, seg_end - seg_start)
+                coarse = max(0.0, seg_start - 4.0)
+                fine = seg_start - coarse
+                fade_str = ""
+                if multi_seg and dur > 0.20:
+                    fades = []
+                    if k > 0:
+                        fades.append("afade=t=in:st=0:d=0.010")
+                    if k < N - 1:
+                        fade_out_st = max(0.0, dur - 0.015)
+                        fades.append(f"afade=t=out:st={fade_out_st:.3f}:d=0.015")
+                    if fades:
+                        fade_str = "," + ",".join(fades)
+                filter_parts.append(
+                    f"[{k + 1}:a:{audio_idx}]atrim=start={fine:.6f}:duration={dur:.6f},"
+                    f"asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0{fade_str}[a{k}]"
+                )
 
-        if len(intervals) > 1:
-            concat_inputs = "".join(f"[a{k}]" for k in range(len(intervals)))
-            filter_parts.append(f"{concat_inputs}concat=n={len(intervals)}:v=0:a=1[srca_raw]")
+        if N > 1:
+            concat_inputs = "".join(f"[a{k}]" for k in range(N))
+            filter_parts.append(f"{concat_inputs}concat=n={N}:v=0:a=1[srca_raw]")
             a_cur = "[srca_raw]"
         else:
             filter_parts.append("[a0]anull[srca_raw]")
@@ -1905,6 +1959,8 @@ def run_pass_2(
 ) -> tuple[int, str]:
     """Execute Pass 2: sub-pixel affine rendering and raw YUV420P streaming into FFmpeg.
 
+    Pre-extracts one PCM WAV per segment using the EXACT SAME hybrid coarse+fine seek
+    as the Pass 2 video decoder to guarantee zero lip-sync drift between audio and video.
     Allocates 25-100% progress.
     """
     out_w = max(2, int(out_w)) & ~1
@@ -1914,240 +1970,351 @@ def run_pass_2(
     if use_cuda is None:
         use_cuda = can_use_cuda_decode(video_path)
 
-    ffmpeg_cmd = build_ffmpeg_cmd(
-        video_path=video_path,
-        output_path=output_path,
-        intervals=intervals,
-        out_w=out_w,
-        out_h=out_h,
-        fps=fps,
-        encoder=encoder,
-        normalize=normalize,
-        has_audio=has_audio,
-        ass_path=ass_path,
-        watermark_path=watermark_path,
-        watermark_config=config.get("watermark"),
-        cwd=cwd,
-        audio_idx=audio_idx,
-        measured_loudnorm=measured_loudnorm,
-    )
+    ffmpeg_bin = shutil.which("ffmpeg") or "ffmpeg"
 
-    logger.info("Spawning FFmpeg process: %s", " ".join(ffmpeg_cmd))
-    proc = subprocess.Popen(
-        ffmpeg_cmd,
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        cwd=str(cwd) if cwd else None,
-    )
+    with tempfile.TemporaryDirectory(prefix="clipforge_p2_audio_") as _tmpdir:
+        # --- Pre-extract matched synchronized PCM WAV per segment ---
+        seg_wav_paths: list[str] | None = None
+        if has_audio:
+            if audio_idx is None:
+                audio_idx = resolve_primary_audio_index(video_path)
+            seg_wav_paths = []
+            for seg_idx, (seg_start, seg_end) in enumerate(intervals):
+                expected_frames = max(1, round((seg_end - seg_start) * fps))
+                exact_seg_dur = expected_frames / fps
+                coarse = max(0.0, seg_start - 4.0)
+                fine = seg_start - coarse
+                seg_wav_path = str(Path(_tmpdir) / f"seg_{seg_idx}.wav")
+                wav_cmd = [
+                    ffmpeg_bin,
+                    "-hide_banner", "-loglevel", "error",
+                    "-ss", f"{coarse:.6f}",
+                    "-i", str(video_path),
+                    "-ss", f"{fine:.6f}",
+                    "-t", f"{exact_seg_dur:.6f}",
+                    "-map", f"0:a:{audio_idx}",
+                    "-af", (
+                        f"aresample=48000:async=1:first_pts=0,"
+                        f"apad=whole_dur={exact_seg_dur:.6f},"
+                        f"atrim=0:{exact_seg_dur:.6f}"
+                    ),
+                    "-ac", "2",
+                    "-ar", "48000",
+                    "-c:a", "pcm_s16le",
+                    "-y", seg_wav_path,
+                ]
+                try:
+                    subprocess.run(
+                        wav_cmd,
+                        stdout=subprocess.PIPE,
+                        stderr=subprocess.PIPE,
+                        timeout=max(30.0, exact_seg_dur * 2.0 + 10.0),
+                        check=False,
+                    )
+                    if Path(seg_wav_path).is_file() and Path(seg_wav_path).stat().st_size > 44:
+                        seg_wav_paths.append(seg_wav_path)
+                    else:
+                        logger.warning("WAV extraction failed for segment %d — falling back to no-WAV mode", seg_idx)
+                        seg_wav_paths = None
+                        break
+                except Exception as exc:
+                    logger.warning("WAV extraction error for segment %d: %s — falling back", seg_idx, exc)
+                    seg_wav_paths = None
+                    break
 
-    stderr_lines: collections.deque[bytes] = collections.deque(maxlen=300)
+        # Measure loudnorm using extracted WAVs when available, else from video
+        if has_audio and normalize and measured_loudnorm is None:
+            if seg_wav_paths:
+                # Measure from the already-extracted WAV files
+                try:
+                    ln_cmd = [ffmpeg_bin, "-hide_banner", "-y"]
+                    for wav_path in seg_wav_paths:
+                        ln_cmd += ["-i", wav_path]
+                    ln_parts: list[str] = []
+                    for k in range(len(seg_wav_paths)):
+                        seg_start, seg_end = intervals[k]
+                        dur = max(0.001, seg_end - seg_start)
+                        multi_seg = len(seg_wav_paths) > 1
+                        fade_str = ""
+                        if multi_seg and dur > 0.020:
+                            fades = []
+                            if k > 0:
+                                fades.append("afade=t=in:st=0:d=0.010")
+                            if k < len(seg_wav_paths) - 1:
+                                fade_out_st = max(0.0, dur - 0.015)
+                                fades.append(f"afade=t=out:st={fade_out_st:.3f}:d=0.015")
+                            if fades:
+                                fade_str = "," + ",".join(fades)
+                        ln_parts.append(
+                            f"[{k}:a:0]asetpts=PTS-STARTPTS,aresample=48000:async=1:first_pts=0{fade_str}[a{k}]"
+                        )
+                    if len(seg_wav_paths) > 1:
+                        concat_in = "".join(f"[a{k}]" for k in range(len(seg_wav_paths)))
+                        ln_parts.append(f"{concat_in}concat=n={len(seg_wav_paths)}:v=0:a=1[srca_raw]")
+                    else:
+                        ln_parts.append("[a0]anull[srca_raw]")
+                    ln_parts.append("[srca_raw]loudnorm=I=-14:TP=-1.5:LRA=11:print_format=json[aout]")
+                    ln_cmd += ["-filter_complex", ";".join(ln_parts), "-map", "[aout]", "-f", "null", "-"]
+                    ln_res = subprocess.run(
+                        ln_cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=15
+                    )
+                    stderr_ln = ln_res.stderr or ""
+                    last_open = stderr_ln.rfind("{")
+                    last_close = stderr_ln.rfind("}")
+                    if last_open != -1 and last_close > last_open:
+                        parsed = json.loads(stderr_ln[last_open: last_close + 1])
+                        required_keys = ("input_i", "input_tp", "input_lra", "input_thresh", "target_offset")
+                        if all(k in parsed for k in required_keys):
+                            vals: dict[str, str] = {}
+                            valid = True
+                            for k in required_keys:
+                                rv = float(parsed[k])
+                                if not math.isfinite(rv):
+                                    valid = False
+                                    break
+                                vals[k] = f"{rv:.2f}"
+                            if valid:
+                                measured_loudnorm = vals
+                except Exception as exc:
+                    logger.warning("WAV-based loudnorm measurement failed: %s", exc)
+            if measured_loudnorm is None:
+                measured_loudnorm = measure_loudnorm(video_path, intervals, audio_idx or 0)
 
-    def drain_stderr():
-        assert proc.stderr
+        ffmpeg_cmd = build_ffmpeg_cmd(
+            video_path=video_path,
+            output_path=output_path,
+            intervals=intervals,
+            out_w=out_w,
+            out_h=out_h,
+            fps=fps,
+            encoder=encoder,
+            normalize=normalize,
+            has_audio=has_audio,
+            ass_path=ass_path,
+            watermark_path=watermark_path,
+            watermark_config=config.get("watermark"),
+            cwd=cwd,
+            audio_idx=audio_idx,
+            measured_loudnorm=measured_loudnorm,
+            seg_wav_paths=seg_wav_paths,
+        )
+
+        logger.info("Spawning FFmpeg process: %s", " ".join(ffmpeg_cmd))
+        proc = subprocess.Popen(
+            ffmpeg_cmd,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            cwd=str(cwd) if cwd else None,
+        )
+
+        stderr_lines: collections.deque[bytes] = collections.deque(maxlen=300)
+
+        def drain_stderr():
+            assert proc.stderr
+            try:
+                while line := proc.stderr.readline():
+                    stderr_lines.append(line)
+            except Exception:
+                pass
+
+        stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
+        stderr_thread.start()
+
+        layout = config.get("layout_template", "split_vertical")
+        mode = config.get("framing_mode", "gaming")
+        fit_mode = config.get("pane_fit_mode", "fill") or "fill"
+        split_ratio = max(10, min(90, int(config.get("split_ratio", 50))))
+
+        is_podcast_dual = (
+            mode == "podcast"
+            or layout in ("side_by_side_blur", "split_vertical", "split_inverted", "wide_plus_dual", "podcast_active_speaker")
+        ) and mode not in ("gaming", "screen_presenter")
+
+        # Pre-allocate single (out_h, out_w, 3) uint8 output canvas once before frame loop
+        canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
+
+        global_frame_idx = 0
+        last_reported_pct = -1
+
         try:
-            while line := proc.stderr.readline():
-                stderr_lines.append(line)
+            for seg_idx, (seg_start, seg_end) in enumerate(intervals):
+                seg_dur = max(0.001, seg_end - seg_start)
+                seg_emitted = 0
+
+                for frame in decode_segment_frames(video_path, seg_start, seg_dur, fps, src_w, src_h, use_cuda=use_cuda):
+                    step_plan = plan[min(global_frame_idx, len(plan) - 1)]
+                    l_type = step_plan.get("layout_type", "0_person")
+
+                    if is_podcast_dual:
+                        if l_type == "2_person":
+                            b1 = step_plan["box_p1"]
+                            b2 = step_plan["box_p2"]
+
+                            if layout == "split_vertical":
+                                top_h = max(2, min(out_h - 2, int(out_h * split_ratio / 100) & ~1))
+                                bot_h = out_h - top_h
+                                p1 = render_pane(frame, b1, out_w, top_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p1", False))
+                                p2 = render_pane(frame, b2, out_w, bot_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p2", False))
+                                canvas[0:top_h, 0:out_w] = p1
+                                canvas[top_h:out_h, 0:out_w] = p2
+
+                            elif layout == "split_inverted":
+                                top_h = max(2, min(out_h - 2, int(out_h * split_ratio / 100) & ~1))
+                                bot_h = out_h - top_h
+                                p2 = render_pane(frame, b2, out_w, top_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p2", False))
+                                p1 = render_pane(frame, b1, out_w, bot_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p1", False))
+                                canvas[0:top_h, 0:out_w] = p2
+                                canvas[top_h:out_h, 0:out_w] = p1
+
+                            elif layout == "side_by_side_blur":
+                                left_w = (out_w // 2) & ~1
+                                right_w = out_w - left_w
+                                pane_h = max(2, min(out_h, int(left_w * (16 / 9)) & ~1))
+                                overlay_y = max(0, (out_h - pane_h) // 2)
+                                p1 = render_pane(frame, b1, left_w, pane_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p1", False))
+                                p2 = render_pane(frame, b2, right_w, pane_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p2", False))
+                                canvas[:] = render_blurred_background(frame, out_w, out_h)
+                                canvas[overlay_y:overlay_y + pane_h, 0:left_w] = p1
+                                canvas[overlay_y:overlay_y + pane_h, left_w:out_w] = p2
+
+                            elif layout == "wide_plus_dual":
+                                top_h = 690 if (out_w, out_h) == (1080, 1920) else max(2, int(out_h * 0.36) & ~1)
+                                bot_h = out_h - top_h
+                                left_w = (out_w // 2) & ~1
+                                right_w = out_w - left_w
+                                top_wide = fast_render_pane(frame, {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, out_w, top_h, fit_mode="fill")
+                                p1 = render_pane(frame, b1, left_w, bot_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p1", False))
+                                p2 = render_pane(frame, b2, right_w, bot_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p2", False))
+                                canvas[0:top_h, 0:out_w] = top_wide
+                                canvas[top_h:out_h, 0:left_w] = p1
+                                canvas[top_h:out_h, left_w:out_w] = p2
+
+                            else:  # podcast_active_speaker in dual shot
+                                canvas[:] = render_pane(frame, b1, out_w, out_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p1", False))
+
+                        elif l_type == "1_person":
+                            canvas[:] = render_pane(frame, step_plan["box_p1"], out_w, out_h, fit_mode=fit_mode, is_static=step_plan.get("is_static", False))
+
+                        else:  # 0_person
+                            canvas[:] = render_blurred_fill(frame, out_w, out_h)
+
+                    elif mode in ("gaming", "screen_presenter"):
+                        g_state = step_plan.get("gaming_state")
+                        if mode == "gaming" and g_state == "fullscreen_cam":
+                            is_static = step_plan.get("is_static", False)
+                            canvas[:] = render_pane(frame, step_plan["box_cam"], out_w, out_h, fit_mode=fit_mode, head_bias=True, is_static=is_static)
+                        elif mode == "gaming" and g_state == "cam_hidden":
+                            gb = step_plan["gameplay_box"]
+                            if layout == "fullscreen_crop":
+                                canvas[:] = fast_render_pane(frame, gb, out_w, out_h, fit_mode=fit_mode, head_bias=False)
+                            else:
+                                canvas[:] = render_blurred_fill(frame, out_w, out_h, fg_box=gb)
+                        else:
+                            wb = step_plan["webcam_box"]
+                            gb = step_plan["gameplay_box"]
+                            is_stationary_wb = step_plan.get("is_static_webcam", g_state == "overlay_locked" or l_type == "gaming_overlay_locked")
+
+                            if layout == "pip":
+                                fb_w = max(0.01, float(wb["w"]))
+                                fb_h = max(0.01, float(wb["h"]))
+                                pip_w = max(160, (out_w // 3) & ~1)
+                                pip_h = max(90, int(pip_w * (fb_h / fb_w) * (src_h / src_w)) & ~1)
+                                main_p = fast_render_pane(frame, gb, out_w, out_h, fit_mode=fit_mode, head_bias=False)
+                                pip_p = (
+                                    fast_render_pane(frame, wb, pip_w, pip_h, fit_mode="fill", head_bias=False)
+                                    if is_stationary_wb
+                                    else subpixel_render_pane(frame, wb, pip_w, pip_h, fit_mode="fill", head_bias=False)
+                                )
+                                canvas[:] = main_p
+                                canvas[20:20 + pip_h, out_w - pip_w - 20:out_w - 20] = pip_p
+
+                            elif layout == "split_inverted":
+                                top_h = max(2, min(out_h - 2, int(out_h * split_ratio / 100) & ~1))
+                                bot_h = out_h - top_h
+                                if mode == "screen_presenter":
+                                    top_p = (
+                                        fast_render_pane(frame, wb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
+                                        if is_stationary_wb
+                                        else subpixel_render_pane(frame, wb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
+                                    )
+                                    bot_p = fast_render_pane(frame, gb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
+                                else:
+                                    top_p = fast_render_pane(frame, gb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
+                                    bot_p = (
+                                        fast_render_pane(frame, wb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
+                                        if is_stationary_wb
+                                        else subpixel_render_pane(frame, wb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
+                                    )
+                                canvas[0:top_h, 0:out_w] = top_p
+                                canvas[top_h:out_h, 0:out_w] = bot_p
+
+                            elif layout == "fullscreen_crop":
+                                canvas[:] = fast_render_pane(frame, gb, out_w, out_h, fit_mode=fit_mode, head_bias=False)
+
+                            else:  # split_vertical
+                                top_h = max(2, min(out_h - 2, int(out_h * split_ratio / 100) & ~1))
+                                bot_h = out_h - top_h
+                                if mode == "screen_presenter":
+                                    top_p = fast_render_pane(frame, gb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
+                                    bot_p = (
+                                        fast_render_pane(frame, wb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
+                                        if is_stationary_wb
+                                        else subpixel_render_pane(frame, wb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
+                                    )
+                                else:
+                                    top_p = (
+                                        fast_render_pane(frame, wb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
+                                        if is_stationary_wb
+                                        else subpixel_render_pane(frame, wb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
+                                    )
+                                    bot_p = fast_render_pane(frame, gb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
+                                canvas[0:top_h, 0:out_w] = top_p
+                                canvas[top_h:out_h, 0:out_w] = bot_p
+
+                    else:
+                        # Single-Person Layouts (fullscreen_crop, punch_in_zoom)
+                        if l_type == "1_person":
+                            canvas[:] = render_pane(frame, step_plan["box_p1"], out_w, out_h, fit_mode=fit_mode, is_static=step_plan.get("is_static", False))
+                        else:
+                            canvas[:] = render_blurred_fill(frame, out_w, out_h)
+
+                    try:
+                        assert proc.stdin
+                        yuv_bytes = cv2.cvtColor(canvas, cv2.COLOR_BGR2YUV_I420).tobytes()
+                        proc.stdin.write(yuv_bytes)
+                    except (BrokenPipeError, OSError):
+                        logger.warning("FFmpeg pipe closed unexpectedly during Pass 2.")
+                        break
+
+                    seg_emitted += 1
+                    global_frame_idx += 1
+
+                    if global_frame_idx % 100 == 0:
+                        gc.collect()
+
+                    pct = min(99, 25 + int(74.0 * global_frame_idx / max(1, total_target_frames)))
+                    if pct != last_reported_pct:
+                        print(f"PROGRESS:{pct}", flush=True)
+                        last_reported_pct = pct
+
+        finally:
+            gc.collect()
+
+        try:
+            if proc.stdin:
+                proc.stdin.close()
         except Exception:
             pass
 
-    stderr_thread = threading.Thread(target=drain_stderr, daemon=True)
-    stderr_thread.start()
+        return_code = proc.wait()
+        stderr_thread.join(timeout=3.0)
+        stderr_text = b"".join(stderr_lines).decode("utf-8", errors="replace")
 
-    layout = config.get("layout_template", "split_vertical")
-    mode = config.get("framing_mode", "gaming")
-    fit_mode = config.get("pane_fit_mode", "fill") or "fill"
-    split_ratio = max(10, min(90, int(config.get("split_ratio", 50))))
+        if return_code == 0:
+            print("PROGRESS:100", flush=True)
 
-    is_podcast_dual = (
-        mode == "podcast"
-        or layout in ("side_by_side_blur", "split_vertical", "split_inverted", "wide_plus_dual", "podcast_active_speaker")
-    ) and mode not in ("gaming", "screen_presenter")
-
-    # Pre-allocate single (out_h, out_w, 3) uint8 output canvas once before frame loop
-    canvas = np.zeros((out_h, out_w, 3), dtype=np.uint8)
-
-    global_frame_idx = 0
-    last_reported_pct = -1
-
-    try:
-        for seg_idx, (seg_start, seg_end) in enumerate(intervals):
-            seg_dur = max(0.001, seg_end - seg_start)
-            seg_emitted = 0
-
-            for frame in decode_segment_frames(video_path, seg_start, seg_dur, fps, src_w, src_h, use_cuda=use_cuda):
-                step_plan = plan[min(global_frame_idx, len(plan) - 1)]
-                l_type = step_plan.get("layout_type", "0_person")
-
-                if is_podcast_dual:
-                    if l_type == "2_person":
-                        b1 = step_plan["box_p1"]
-                        b2 = step_plan["box_p2"]
-
-                        if layout == "split_vertical":
-                            top_h = max(2, min(out_h - 2, int(out_h * split_ratio / 100) & ~1))
-                            bot_h = out_h - top_h
-                            p1 = render_pane(frame, b1, out_w, top_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p1", False))
-                            p2 = render_pane(frame, b2, out_w, bot_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p2", False))
-                            canvas[0:top_h, 0:out_w] = p1
-                            canvas[top_h:out_h, 0:out_w] = p2
-
-                        elif layout == "split_inverted":
-                            top_h = max(2, min(out_h - 2, int(out_h * split_ratio / 100) & ~1))
-                            bot_h = out_h - top_h
-                            p2 = render_pane(frame, b2, out_w, top_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p2", False))
-                            p1 = render_pane(frame, b1, out_w, bot_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p1", False))
-                            canvas[0:top_h, 0:out_w] = p2
-                            canvas[top_h:out_h, 0:out_w] = p1
-
-                        elif layout == "side_by_side_blur":
-                            left_w = (out_w // 2) & ~1
-                            right_w = out_w - left_w
-                            pane_h = max(2, min(out_h, int(left_w * (16 / 9)) & ~1))
-                            overlay_y = max(0, (out_h - pane_h) // 2)
-                            p1 = render_pane(frame, b1, left_w, pane_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p1", False))
-                            p2 = render_pane(frame, b2, right_w, pane_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p2", False))
-                            canvas[:] = render_blurred_background(frame, out_w, out_h)
-                            canvas[overlay_y:overlay_y + pane_h, 0:left_w] = p1
-                            canvas[overlay_y:overlay_y + pane_h, left_w:out_w] = p2
-
-                        elif layout == "wide_plus_dual":
-                            top_h = 690 if (out_w, out_h) == (1080, 1920) else max(2, int(out_h * 0.36) & ~1)
-                            bot_h = out_h - top_h
-                            left_w = (out_w // 2) & ~1
-                            right_w = out_w - left_w
-                            top_wide = fast_render_pane(frame, {"x": 0.0, "y": 0.0, "w": 1.0, "h": 1.0}, out_w, top_h, fit_mode="fill")
-                            p1 = render_pane(frame, b1, left_w, bot_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p1", False))
-                            p2 = render_pane(frame, b2, right_w, bot_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p2", False))
-                            canvas[0:top_h, 0:out_w] = top_wide
-                            canvas[top_h:out_h, 0:left_w] = p1
-                            canvas[top_h:out_h, left_w:out_w] = p2
-
-                        else:  # podcast_active_speaker in dual shot
-                            canvas[:] = render_pane(frame, b1, out_w, out_h, fit_mode=fit_mode, is_static=step_plan.get("is_static_p1", False))
-
-                    elif l_type == "1_person":
-                        canvas[:] = render_pane(frame, step_plan["box_p1"], out_w, out_h, fit_mode=fit_mode, is_static=step_plan.get("is_static", False))
-
-                    else:  # 0_person
-                        canvas[:] = render_blurred_fill(frame, out_w, out_h)
-
-                elif mode in ("gaming", "screen_presenter"):
-                    g_state = step_plan.get("gaming_state")
-                    if mode == "gaming" and g_state == "fullscreen_cam":
-                        is_static = step_plan.get("is_static", False)
-                        canvas[:] = render_pane(frame, step_plan["box_cam"], out_w, out_h, fit_mode=fit_mode, head_bias=True, is_static=is_static)
-                    elif mode == "gaming" and g_state == "cam_hidden":
-                        gb = step_plan["gameplay_box"]
-                        if layout == "fullscreen_crop":
-                            canvas[:] = fast_render_pane(frame, gb, out_w, out_h, fit_mode=fit_mode, head_bias=False)
-                        else:
-                            canvas[:] = render_blurred_fill(frame, out_w, out_h, fg_box=gb)
-                    else:
-                        wb = step_plan["webcam_box"]
-                        gb = step_plan["gameplay_box"]
-                        is_stationary_wb = step_plan.get("is_static_webcam", g_state == "overlay_locked" or l_type == "gaming_overlay_locked")
-
-                        if layout == "pip":
-                            fb_w = max(0.01, float(wb["w"]))
-                            fb_h = max(0.01, float(wb["h"]))
-                            pip_w = max(160, (out_w // 3) & ~1)
-                            pip_h = max(90, int(pip_w * (fb_h / fb_w) * (src_h / src_w)) & ~1)
-                            main_p = fast_render_pane(frame, gb, out_w, out_h, fit_mode=fit_mode, head_bias=False)
-                            pip_p = (
-                                fast_render_pane(frame, wb, pip_w, pip_h, fit_mode="fill", head_bias=False)
-                                if is_stationary_wb
-                                else subpixel_render_pane(frame, wb, pip_w, pip_h, fit_mode="fill", head_bias=False)
-                            )
-                            canvas[:] = main_p
-                            canvas[20:20 + pip_h, out_w - pip_w - 20:out_w - 20] = pip_p
-
-                        elif layout == "split_inverted":
-                            top_h = max(2, min(out_h - 2, int(out_h * split_ratio / 100) & ~1))
-                            bot_h = out_h - top_h
-                            if mode == "screen_presenter":
-                                top_p = (
-                                    fast_render_pane(frame, wb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
-                                    if is_stationary_wb
-                                    else subpixel_render_pane(frame, wb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
-                                )
-                                bot_p = fast_render_pane(frame, gb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
-                            else:
-                                top_p = fast_render_pane(frame, gb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
-                                bot_p = (
-                                    fast_render_pane(frame, wb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
-                                    if is_stationary_wb
-                                    else subpixel_render_pane(frame, wb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
-                                )
-                            canvas[0:top_h, 0:out_w] = top_p
-                            canvas[top_h:out_h, 0:out_w] = bot_p
-
-                        elif layout == "fullscreen_crop":
-                            canvas[:] = fast_render_pane(frame, gb, out_w, out_h, fit_mode=fit_mode, head_bias=False)
-
-                        else:  # split_vertical
-                            top_h = max(2, min(out_h - 2, int(out_h * split_ratio / 100) & ~1))
-                            bot_h = out_h - top_h
-                            if mode == "screen_presenter":
-                                top_p = fast_render_pane(frame, gb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
-                                bot_p = (
-                                    fast_render_pane(frame, wb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
-                                    if is_stationary_wb
-                                    else subpixel_render_pane(frame, wb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
-                                )
-                            else:
-                                top_p = (
-                                    fast_render_pane(frame, wb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
-                                    if is_stationary_wb
-                                    else subpixel_render_pane(frame, wb, out_w, top_h, fit_mode=fit_mode, head_bias=False)
-                                )
-                                bot_p = fast_render_pane(frame, gb, out_w, bot_h, fit_mode=fit_mode, head_bias=False)
-                            canvas[0:top_h, 0:out_w] = top_p
-                            canvas[top_h:out_h, 0:out_w] = bot_p
-
-                else:
-                    # Single-Person Layouts (fullscreen_crop, punch_in_zoom)
-                    if l_type == "1_person":
-                        canvas[:] = render_pane(frame, step_plan["box_p1"], out_w, out_h, fit_mode=fit_mode, is_static=step_plan.get("is_static", False))
-                    else:
-                        canvas[:] = render_blurred_fill(frame, out_w, out_h)
-
-                try:
-                    assert proc.stdin
-                    yuv_bytes = cv2.cvtColor(canvas, cv2.COLOR_BGR2YUV_I420).tobytes()
-                    proc.stdin.write(yuv_bytes)
-                except (BrokenPipeError, OSError):
-                    logger.warning("FFmpeg pipe closed unexpectedly during Pass 2.")
-                    break
-
-                seg_emitted += 1
-                global_frame_idx += 1
-
-                if global_frame_idx % 100 == 0:
-                    gc.collect()
-
-                pct = min(99, 25 + int(74.0 * global_frame_idx / max(1, total_target_frames)))
-                if pct != last_reported_pct:
-                    print(f"PROGRESS:{pct}", flush=True)
-                    last_reported_pct = pct
-
-    finally:
-        gc.collect()
-
-    try:
-        if proc.stdin:
-            proc.stdin.close()
-    except Exception:
-        pass
-
-    return_code = proc.wait()
-    stderr_thread.join(timeout=3.0)
-    stderr_text = b"".join(stderr_lines).decode("utf-8", errors="replace")
-
-    if return_code == 0:
-        print("PROGRESS:100", flush=True)
-
-    return return_code, stderr_text
+        return return_code, stderr_text
 
 
 # ---------------------------------------------------------------------------

@@ -164,6 +164,7 @@ def main():
     parser.add_argument("--po-token", type=str, default=None)
     parser.add_argument("--js-runtime", type=str, default=None)
     parser.add_argument("--twitch-chat-cli", type=str, default=None)
+    parser.add_argument("--mine-engagement", action="store_true", default=False)
     args = parser.parse_args()
 
     output_dir = Path(args.output_dir)
@@ -188,7 +189,9 @@ def main():
         "progress_hooks": [progress_hook],
         "quiet": True,
         "no_warnings": True,
-        "getcomments": True,
+        "socket_timeout": 30,
+        "retries": 3,
+        "fragment_retries": 3,
     }
 
     if args.download_mode == "fast_vod":
@@ -202,10 +205,11 @@ def main():
         ydl_opts["cookiefile"] = args.cookies_file
 
     if args.po_token:
-        ydl_opts["extractor_args"] = {"youtube": {"po_token": [args.po_token]}}
+        yt_args = ydl_opts.setdefault("extractor_args", {}).setdefault("youtube", {})
+        yt_args["po_token"] = [args.po_token]
 
-    if args.js_runtime and args.js_runtime != "auto":
-        ydl_opts["js_runtimes"] = [args.js_runtime]
+    if args.js_runtime and args.js_runtime.strip().lower() != "auto":
+        ydl_opts["js_runtimes"] = {args.js_runtime.strip().lower(): {}}
 
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -230,12 +234,42 @@ def main():
             check=True,
         )
 
-        emit_progress(95.0, "analyzing_engagement", "Analyzing retention heatmap & comments...")
+        emit_progress(95.0, "analyzing_engagement", "Analyzing retention heatmap & audio energy...")
 
-        # Parse signals
+        # Parse signals (heatmap comes bundled in info at zero extra HTTP requests)
         heatmap_points = parse_heatmap(info)
-        comment_points = parse_comment_timestamps(info)
-        chat_points = parse_live_chat_velocity(info)
+        comment_points = []
+        chat_points = []
+
+        if args.mine_engagement:
+            try:
+                eng_opts = {
+                    "quiet": True,
+                    "no_warnings": True,
+                    "skip_download": True,
+                    "getcomments": True,
+                    "socket_timeout": 30,
+                    "retries": 2,
+                }
+                if "cookiesfrombrowser" in ydl_opts:
+                    eng_opts["cookiesfrombrowser"] = ydl_opts["cookiesfrombrowser"]
+                elif "cookiefile" in ydl_opts:
+                    eng_opts["cookiefile"] = ydl_opts["cookiefile"]
+                if "js_runtimes" in ydl_opts:
+                    eng_opts["js_runtimes"] = ydl_opts["js_runtimes"]
+                yt_eng_args = eng_opts.setdefault("extractor_args", {}).setdefault("youtube", {})
+                if args.po_token:
+                    yt_eng_args["po_token"] = [args.po_token]
+                yt_eng_args["max_comments"] = ["40", "40", "0", "0"]
+
+                with yt_dlp.YoutubeDL(eng_opts) as eng_ydl:
+                    eng_info = eng_ydl.extract_info(args.url, download=False)
+                if eng_info:
+                    comment_points = parse_comment_timestamps(eng_info)
+                    chat_points = parse_live_chat_velocity(eng_info)
+            except Exception:
+                comment_points = []
+                chat_points = []
 
         # Run audio energy analysis directly in worker
         from audio_energy_worker import analyze_audio_energy
@@ -254,7 +288,7 @@ def main():
 
         emit_progress(100.0, "ready", "Ingestion and signal mining complete!")
 
-        # Output final result JSON for parent service
+        # Write full result JSON to disk and emit compact COMPLETE line for parent service
         result = {
             "title": info.get("title", "YouTube Video"),
             "video_path": str(downloaded_file),
@@ -265,10 +299,22 @@ def main():
             "fps": info.get("fps"),
             "signals": signals_data,
         }
-        print("COMPLETE:" + json.dumps(result), flush=True)
+        result_file_path = output_dir / "ingest_result.json"
+        with open(result_file_path, "w", encoding="utf-8") as f:
+            json.dump(result, f, ensure_ascii=False)
+        print(f"COMPLETE:{json.dumps({'result_file': str(result_file_path)})}", flush=True)
 
     except Exception as e:
-        print("ERROR:" + str(e), file=sys.stderr, flush=True)
+        err_str = str(e)
+        if "429" in err_str or "Sign in to confirm you" in err_str:
+            friendly = (
+                "YouTube temporarily rate-limited this IP (HTTP 429 / bot check). "
+                "Please wait a few minutes and try again, or add a cookies.txt file "
+                "(or select Firefox cookies) in ClipForge Settings."
+            )
+            print(f"ERROR:{friendly}", file=sys.stderr, flush=True)
+        else:
+            print("ERROR:" + err_str, file=sys.stderr, flush=True)
         sys.exit(1)
 
 
